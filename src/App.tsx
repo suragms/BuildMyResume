@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Upload, Download, Check, X, FileText, ChevronRight, ChevronLeft, Pencil, Layout, Zap, Shield, Clock, Link } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Upload, Download, Check, X, FileText, ChevronRight, ChevronLeft, Pencil, Layout, Zap, Shield, Clock, Link, AlertCircle, Sparkles, Target, CheckCircle2, XCircle, Crown, Star, ZoomIn, ZoomOut } from 'lucide-react';
+import { extractKeywords, checkGrammar, matchATSKeywords, calculateATSScore, detectExperienceLevel, getMissingSections, type KeywordResult, type ATSMatch, type GrammarResult } from './ai-service';
 import './index.css';
 
 const CONFIG = { price: 19, watermark: 'hexastack.com' };
@@ -35,9 +36,14 @@ interface ParseLog {
 type Step = 'home' | 'loading' | 'edit' | 'template' | 'preview' | 'pay' | 'done';
 
 const TEMPLATES = [
-    { id: 'classic', name: 'Classic', desc: 'Clean and professional' },
-    { id: 'modern', name: 'Modern', desc: 'Contemporary layout' },
-    { id: 'minimal', name: 'Minimal', desc: 'Simple and elegant' },
+    // Free Templates
+    { id: 'classic', name: 'Classic', desc: 'Clean and traditional', price: 0, atsScore: 95 },
+    { id: 'modern', name: 'Modern', desc: 'Contemporary design', price: 0, atsScore: 92 },
+    // Premium Templates
+    { id: 'executive', name: 'Executive', desc: 'Bold professional style', price: 19, atsScore: 98 },
+    { id: 'minimal', name: 'Minimal', desc: 'Simple elegance', price: 29, atsScore: 96 },
+    { id: 'creative', name: 'Creative', desc: 'Stand out design', price: 29, atsScore: 88 },
+    { id: 'premium', name: 'Premium Plus', desc: 'All features included', price: 69, atsScore: 99 },
 ];
 
 export default function App() {
@@ -53,12 +59,132 @@ export default function App() {
     const [isAdmin, setIsAdmin] = useState(false);
     const [showAdmin, setShowAdmin] = useState(false);
     const [parseLog, setParseLog] = useState<ParseLog[]>([]);
+    const [jdKeywords, setJdKeywords] = useState<KeywordResult | null>(null);
+    const [atsMatches, setAtsMatches] = useState<ATSMatch[]>([]);
+    const [atsScore, setAtsScore] = useState<number>(0);
+    const [grammarResults, setGrammarResults] = useState<Record<string, GrammarResult>>({});
+    const [experienceLevel, setExperienceLevel] = useState<'fresher' | 'experienced' | 'unknown'>('unknown');
+    const [missingSections, setMissingSections] = useState<string[]>([]);
+    const [aiLoading, setAiLoading] = useState<string | null>(null);
+    const [isDownloading, setIsDownloading] = useState(false);
+    const [downloadError, setDownloadError] = useState<string | null>(null);
+    const [cvScale, setCvScale] = useState(0.7);
+    const previewContainerRef = useRef<HTMLDivElement>(null);
+    const cvPaperRef = useRef<HTMLDivElement>(null);
+
+    // Dynamic CV scaling for preview
+    useEffect(() => {
+        const calculateScale = () => {
+            if (step !== 'template') return;
+            if (!previewContainerRef.current || !cvPaperRef.current) return;
+            const containerWidth = previewContainerRef.current.clientWidth - 60;
+            const paperWidth = 595;
+            const scaleW = containerWidth / paperWidth;
+            const idealScale = Math.min(scaleW, 0.85);
+            setCvScale(Math.max(idealScale, 0.4));
+        };
+        const timeout = setTimeout(calculateScale, 150);
+        window.addEventListener('resize', calculateScale);
+        return () => {
+            window.removeEventListener('resize', calculateScale);
+            clearTimeout(timeout);
+        };
+    }, [step, template]);
 
     useEffect(() => {
         const h = (e: KeyboardEvent) => { if (e.ctrlKey && e.shiftKey && e.key === 'A') { setIsAdmin(true); setShowAdmin(true); } };
         window.addEventListener('keydown', h);
         return () => window.removeEventListener('keydown', h);
     }, []);
+
+    // Auto-save resume to localStorage
+    useEffect(() => {
+        if (resume.name || resume.email || resume.skills.length > 0) {
+            localStorage.setItem('hexastack_resume', JSON.stringify(resume));
+        }
+    }, [resume]);
+
+    // Load saved resume on mount
+    useEffect(() => {
+        const saved = localStorage.getItem('hexastack_resume');
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved);
+                if (parsed.name || parsed.email) {
+                    setResume(parsed);
+                }
+            } catch (e) {
+                console.error('Failed to load saved resume');
+            }
+        }
+    }, []);
+
+    // Auto-save to localStorage
+    useEffect(() => {
+        const saved = localStorage.getItem('hexaResume');
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved);
+                setResume(prev => ({ ...prev, ...parsed }));
+            } catch (e) {
+                console.error('Failed to load saved resume');
+            }
+        }
+    }, []);
+
+    useEffect(() => {
+        if (resume.name || resume.email || resume.skills.length > 0) {
+            localStorage.setItem('hexaResume', JSON.stringify(resume));
+        }
+    }, [resume]);
+
+    // Auto-detect experience level and missing sections
+    useEffect(() => {
+        const level = detectExperienceLevel(resume);
+        setExperienceLevel(level);
+        const missing = getMissingSections(resume, level);
+        setMissingSections(missing);
+    }, [resume]);
+
+    // Extract JD keywords when job description changes
+    useEffect(() => {
+        const analyzeJD = async () => {
+            if (!resume.jobDescription.trim()) {
+                setJdKeywords(null);
+                setAtsMatches([]);
+                setAtsScore(0);
+                return;
+            }
+            setAiLoading('keywords');
+            try {
+                const keywords = await extractKeywords(resume.jobDescription);
+                setJdKeywords(keywords);
+                // Match against resume
+                const resumeText = `${resume.profile} ${resume.skills.join(' ')} ${resume.experience} ${resume.education} ${resume.projects}`;
+                const matches = matchATSKeywords(resumeText, keywords);
+                setAtsMatches(matches);
+                setAtsScore(calculateATSScore(matches));
+            } catch (err) {
+                console.error('JD analysis failed:', err);
+            }
+            setAiLoading(null);
+        };
+        const debounce = setTimeout(analyzeJD, 800);
+        return () => clearTimeout(debounce);
+    }, [resume.jobDescription, resume.profile, resume.skills, resume.experience, resume.education, resume.projects]);
+
+    // Grammar check function
+    const runGrammarCheck = async (field: string, text: string) => {
+        if (!text.trim() || text.length < 20) return;
+        setAiLoading(`grammar_${field}`);
+        try {
+            const result = await checkGrammar(text);
+            setGrammarResults(prev => ({ ...prev, [field]: result }));
+        } catch (err) {
+            console.error('Grammar check failed:', err);
+        }
+        setAiLoading(null);
+    };
 
     // Advanced PDF Parser
     const parseResume = useCallback((text: string): { resume: Resume; log: ParseLog[] } => {
@@ -287,77 +413,156 @@ export default function App() {
     const downloadPDF = async () => {
         const { jsPDF } = await import('jspdf');
         const doc = new jsPDF('p', 'mm', 'a4');
-        let y = 20;
+        const pageWidth = 210;
+        const margin = 20;
+        const contentWidth = pageWidth - (margin * 2);
+        let y = 25;
 
-        // Name
+        // Template-specific colors
+        const templateColors: Record<string, { primary: string; accent: string }> = {
+            classic: { primary: '#1a1a1a', accent: '#333333' },
+            modern: { primary: '#0f172a', accent: '#1e40af' },
+            executive: { primary: '#111827', accent: '#6366f1' },
+            minimal: { primary: '#374151', accent: '#6b7280' },
+            creative: { primary: '#7c3aed', accent: '#a855f7' },
+            premium: { primary: '#0c4a6e', accent: '#0284c7' },
+        };
+
+        const colors = templateColors[template] || templateColors.classic;
+
+        // Name - Large and bold
         doc.setFont('helvetica', 'bold');
-        doc.setFontSize(18);
-        doc.text(resume.name || 'Your Name', 20, y);
-        y += 7;
+        doc.setFontSize(24);
+        doc.setTextColor(colors.primary);
+        doc.text(resume.name || 'Your Name', margin, y);
+        y += 9;
 
         // Job Role
         if (resume.jobRole) {
             doc.setFont('helvetica', 'normal');
-            doc.setFontSize(14);
-            doc.setTextColor(60);
-            doc.text(resume.jobRole, 20, y);
-            y += 6;
+            doc.setFontSize(13);
+            doc.setTextColor(colors.accent);
+            doc.text(resume.jobRole, margin, y);
+            y += 7;
         }
 
         // Contact line
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(9);
-        doc.setTextColor(80);
+        doc.setTextColor(100);
         const contactParts = [resume.email, resume.phone].filter(Boolean);
-        doc.text(contactParts.join(' • '), 20, y);
-        y += 5;
+        if (contactParts.length) {
+            doc.text(contactParts.join('  •  '), margin, y);
+            y += 5;
+        }
 
         // Links
         if (resume.linkedin || resume.github) {
             const links = [resume.linkedin, resume.github].filter(Boolean);
-            doc.text(links.join(' • '), 20, y);
-            y += 8;
-        } else {
-            y += 3;
+            doc.setTextColor(70, 130, 180);
+            doc.text(links.join('  •  '), margin, y);
+            y += 6;
         }
+
+        y += 4;
+
+        // Divider line
+        doc.setDrawColor(200);
+        doc.setLineWidth(0.3);
+        doc.line(margin, y, pageWidth - margin, y);
+        y += 8;
 
         doc.setTextColor(0);
 
         const addSection = (title: string, content: string) => {
             if (!content) return;
-            if (y > 270) { doc.addPage(); y = 20; } // Handle page break
+            
+            // Check if we need a new page
+            if (y > 265) { 
+                doc.addPage(); 
+                y = 20; 
+            }
+
+            // Section header
             doc.setFont('helvetica', 'bold');
-            doc.setFontSize(10);
-            doc.text(title.toUpperCase(), 20, y);
-            y += 5;
+            doc.setFontSize(11);
+            doc.setTextColor(colors.primary);
+            doc.text(title.toUpperCase(), margin, y);
+            y += 1;
+
+            // Underline
+            doc.setDrawColor(colors.accent);
+            doc.setLineWidth(0.5);
+            doc.line(margin, y + 1, margin + 25, y + 1);
+            y += 6;
+
+            // Content
             doc.setFont('helvetica', 'normal');
-            doc.setFontSize(9);
-            const lines = doc.splitTextToSize(content, 170);
-            doc.text(lines, 20, y);
-            y += lines.length * 4 + 6;
+            doc.setFontSize(10);
+            doc.setTextColor(50);
+            
+            const lines = doc.splitTextToSize(content, contentWidth);
+            
+            for (const line of lines) {
+                if (y > 275) {
+                    doc.addPage();
+                    y = 20;
+                }
+                doc.text(line, margin, y);
+                y += 5;
+            }
+            
+            y += 6;
         };
 
         if (resume.profile) addSection('Profile', resume.profile);
-        if (resume.skills.length) addSection('Skills', resume.skills.join(' • '));
+        if (resume.skills.length) addSection('Skills', resume.skills.join('  •  '));
         if (resume.experience) addSection('Experience', resume.experience);
         if (resume.education) addSection('Education', resume.education);
         if (resume.projects) addSection('Projects', resume.projects);
         if (resume.achievements) addSection('Achievements', resume.achievements);
 
+        // Watermark for unpaid
         if (!paid) {
-            doc.setFontSize(7);
-            doc.setTextColor(200);
-            doc.text(CONFIG.watermark, 105, 290, { align: 'center' });
+            doc.setFontSize(8);
+            doc.setTextColor(180);
+            doc.text(CONFIG.watermark, pageWidth / 2, 290, { align: 'center' });
         }
 
         doc.save(`${resume.name.replace(/\s+/g, '_') || 'resume'}.pdf`);
         stats.log('d');
     };
 
-    const sectionGroups = {
+    // Validation function
+    const validateResume = (): { isValid: boolean; errors: string[] } => {
+        const errors: string[] = [];
+        if (!resume.name.trim()) errors.push('Name is required');
+        if (!resume.email.trim()) errors.push('Email is required');
+        if (resume.skills.length === 0) errors.push('At least one skill is required');
+        return { isValid: errors.length === 0, errors };
+    };
+
+    // Download with validation
+    const handleDownload = async () => {
+        const { isValid, errors } = validateResume();
+        if (!isValid) {
+            setDownloadError(errors.join('. '));
+            setTimeout(() => setDownloadError(null), 4000);
+            return;
+        }
+        setIsDownloading(true);
+        setDownloadError(null);
+        try {
+            await downloadPDF();
+        } catch (err) {
+            setDownloadError('Failed to generate PDF. Please try again.');
+        }
+        setIsDownloading(false);
+    };
+
+    const sectionGroups: { personal: { key: keyof Resume; label: string; multi?: boolean }[]; content: { key: keyof Resume; label: string; multi?: boolean }[] } = {
         personal: [
             { key: 'name', label: 'Full Name' },
-            { key: 'jobRole', label: 'Job Role' },
             { key: 'email', label: 'Email' },
             { key: 'phone', label: 'Phone' },
             { key: 'linkedin', label: 'LinkedIn' },
@@ -370,10 +575,6 @@ export default function App() {
             { key: 'skills', label: 'Skills' },
             { key: 'projects', label: 'Projects', multi: true },
             { key: 'achievements', label: 'Achievements', multi: true },
-        ],
-        target: [
-            { key: 'jobDescription', label: 'Job Description (JD)', multi: true },
-            { key: 'specifications', label: 'Other Specifications', multi: true },
         ]
     };
 
@@ -382,45 +583,84 @@ export default function App() {
 
     const CVPreview = ({ showWatermark = true }: { showWatermark?: boolean }) => (
         <div className={`cv-paper ${template}`}>
-            <div className="cv-header">
-                <h1>{resume.name || 'Your Name'}</h1>
-                {resume.jobRole && <p className="cv-job-title" style={{ fontSize: '1.2em', color: '#666', marginTop: '4px' }}>{resume.jobRole}</p>}
-                <p className="cv-contact-line">
-                    {resume.email || 'email@example.com'}
-                    {resume.phone && ` • ${resume.phone}`}
-                </p>
-                {(resume.linkedin || resume.github) && (
-                    <p className="cv-links">
-                        {resume.linkedin && <span>{resume.linkedin}</span>}
-                        {resume.github && <span>{resume.github}</span>}
+            <div className="cv-page">
+                <div className="cv-header">
+                    <h1>{resume.name || 'Your Name'}</h1>
+                    {resume.jobRole && <p className="cv-job-title">{resume.jobRole}</p>}
+                    <p className="cv-contact-line">
+                        {resume.email || 'email@example.com'}
+                        {resume.phone && ` • ${resume.phone}`}
                     </p>
-                )}
+                    {(resume.linkedin || resume.github) && (
+                        <p className="cv-links">
+                            {resume.linkedin && <span>{resume.linkedin}</span>}
+                            {resume.github && <span>{resume.github}</span>}
+                        </p>
+                    )}
+                </div>
+                <div className="cv-body">
+                    {resume.profile && (
+                        <div className="cv-section">
+                            <h2>Profile</h2>
+                            <p>{resume.profile}</p>
+                        </div>
+                    )}
+                    {resume.skills.length > 0 && (
+                        <div className="cv-section">
+                            <h2>Skills</h2>
+                            <div className="cv-skills">
+                                {resume.skills.map((s, i) => <span key={i}>{s}</span>)}
+                            </div>
+                        </div>
+                    )}
+                    {resume.experience && (
+                        <div className="cv-section">
+                            <h2>Experience</h2>
+                            <div className="cv-text">{resume.experience.split('\n').map((line, i) => (
+                                <p key={i} className={line.match(/^[A-Z].*\d{4}/) ? 'cv-entry-title' : ''}>{line}</p>
+                            ))}</div>
+                        </div>
+                    )}
+                    {resume.education && (
+                        <div className="cv-section">
+                            <h2>Education</h2>
+                            <div className="cv-text">{resume.education.split('\n').map((line, i) => (
+                                <p key={i}>{line}</p>
+                            ))}</div>
+                        </div>
+                    )}
+                    {resume.projects && (
+                        <div className="cv-section">
+                            <h2>Projects</h2>
+                            <div className="cv-text">{resume.projects.split('\n').map((line, i) => (
+                                <p key={i}>{line}</p>
+                            ))}</div>
+                        </div>
+                    )}
+                    {resume.achievements && (
+                        <div className="cv-section">
+                            <h2>Achievements</h2>
+                            <div className="cv-text">{resume.achievements.split('\n').map((line, i) => (
+                                <p key={i}>{line}</p>
+                            ))}</div>
+                        </div>
+                    )}
+                </div>
+                {showWatermark && !paid && <div className="cv-watermark">{CONFIG.watermark}</div>}
             </div>
-            <div className="cv-body">
-                {resume.profile && <div className="cv-section"><h2>Profile</h2><p>{resume.profile}</p></div>}
-                {resume.skills.length > 0 && (
-                    <div className="cv-section">
-                        <h2>Skills</h2>
-                        <div className="cv-skills">{resume.skills.map((s, i) => <span key={i}>{s}</span>)}</div>
-                    </div>
-                )}
-                {resume.experience && <div className="cv-section"><h2>Experience</h2><p>{resume.experience}</p></div>}
-                {resume.education && <div className="cv-section"><h2>Education</h2><p>{resume.education}</p></div>}
-                {resume.projects && <div className="cv-section"><h2>Projects</h2><p>{resume.projects}</p></div>}
-                {resume.achievements && <div className="cv-section"><h2>Achievements</h2><p>{resume.achievements}</p></div>}
-            </div>
-            {showWatermark && !paid && <div className="cv-watermark">{CONFIG.watermark}</div>}
         </div>
     );
 
-    const renderSectionGroup = (title: string, items: any[]) => (
+    const renderSectionGroup = (title: string, items: { key: keyof Resume; label: string; multi?: boolean }[]) => (
         <div className="section-group">
             <h3 className="group-title">{title}</h3>
             <div className="group-items">
-                {items.map((sec: any) => {
-                    const val = sec.key === 'skills' ? resume.skills.join(', ') : resume[sec.key] as string;
-                    const isEmpty = sec.key === 'skills' ? resume.skills.length === 0 : !val;
-                    const isOpen = editing === sec.key;
+                {items.map((sec) => {
+                    const key = sec.key;
+                    const val = key === 'skills' ? resume.skills.join(', ') : String(resume[key] || '');
+                    const isEmpty = key === 'skills' ? resume.skills.length === 0 : !val;
+                    const isOpen = editing === key;
+                    const grammarResult = grammarResults[key];
 
                     return (
                         <div key={sec.key} className={`sec ${isOpen ? 'open' : ''} ${isEmpty ? 'empty' : 'filled'}`}>
@@ -429,6 +669,7 @@ export default function App() {
                                     <div className={`status-indicator ${isEmpty ? 'missing' : 'found'}`}></div>
                                     {sec.label}
                                     {(sec.key === 'linkedin' || sec.key === 'github') && <Link size={12} className="link-icon" />}
+                                    {grammarResult?.hasErrors && <AlertCircle size={12} className="grammar-warning" />}
                                 </span>
                                 <Pencil size={14} className="edit-icon" />
                             </button>
@@ -444,12 +685,24 @@ export default function App() {
                                             <small className="field-hint">Separate skills with commas</small>
                                         </div>
                                     ) : sec.multi ? (
-                                        <textarea
-                                            value={val}
-                                            onChange={e => update(sec.key, e.target.value)}
-                                            rows={6}
-                                            placeholder={`Enter ${sec.label.toLowerCase()}...`}
-                                        />
+                                        <div className="input-wrapper">
+                                            <textarea
+                                                value={val}
+                                                onChange={e => update(sec.key, e.target.value)}
+                                                onBlur={() => sec.multi && runGrammarCheck(sec.key, val)}
+                                                rows={6}
+                                                placeholder={`Enter ${sec.label.toLowerCase()}...`}
+                                            />
+                                            {aiLoading === `grammar_${sec.key}` && <small className="field-hint loading">Checking grammar...</small>}
+                                            {grammarResult?.hasErrors && (
+                                                <div className="grammar-suggestions">
+                                                    <small><Sparkles size={12} /> Suggestions:</small>
+                                                    {grammarResult.corrections.slice(0, 3).map((c, i) => (
+                                                        <span key={i} className="grammar-fix">"{c.original}" → "{c.suggestion}"</span>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
                                     ) : (
                                         <input
                                             value={val}
@@ -465,8 +718,6 @@ export default function App() {
             </div>
         </div>
     );
-
-    const [zoom, setZoom] = useState(0.75);
 
     return (
         <div className="app">
@@ -545,103 +796,190 @@ export default function App() {
 
                 {step === 'edit' && (
                     <section className="editor">
+                        {/* LEFT: Resume Edit */}
                         <div className="editor-left">
                             <div className="editor-header">
-                                <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                                    <button onClick={() => setStep('home')} className="btn-icon-back" title="Back to Home">
-                                        <ChevronLeft size={24} />
-                                    </button>
-                                    <div>
-                                        <h2>Edit Resume</h2>
-                                        <p className="header-sub">Review and edit extracted details</p>
-                                    </div>
+                                <button onClick={() => setStep('home')} className="btn-back">
+                                    <ChevronLeft size={20} />
+                                </button>
+                                <div>
+                                    <h2>Edit Resume</h2>
+                                    <p className="sub">Review and update your details</p>
                                 </div>
-                                <span className="step-badge">Step 1 of 2</span>
+                                <span className="step-badge">1/2</span>
                             </div>
 
-                            {/* Parse Status */}
-                            <div className="parse-status">
-                                <div className="parse-header">
-                                    <span><strong>{foundCount}</strong> of {totalCount} sections found</span>
-                                </div>
-                                <div className="parse-dots">
-                                    {parseLog.map((l, i) => (
-                                        <div key={i} className={`parse - dot ${l.status} `} title={`${l.section}: ${l.status}`}></div>
-                                    ))}
-                                </div>
-                            </div >
-
                             <div className="sections-container">
-                                {renderSectionGroup('Personal Details', sectionGroups.personal)}
-                                {renderSectionGroup('Professional Experience', sectionGroups.content)}
-                                {renderSectionGroup('Resume Tailoring', sectionGroups.target)}
+                                {renderSectionGroup('Personal', sectionGroups.personal)}
+                                {renderSectionGroup('Experience', sectionGroups.content)}
                             </div>
 
                             <button className="btn primary full" onClick={() => setStep('template')}>
-                                Choose Template <ChevronRight size={16} />
+                                Continue <ChevronRight size={16} />
                             </button>
-                        </div >
-
-                        <div className="editor-right">
-                            <div className="cv-frame"><CVPreview /></div>
                         </div>
-                    </section >
-                )
-                }
 
-                {
-                    step === 'template' && (
-                        <section className="template-page">
-                            <div className="template-header">
-                                <h2>Choose Template</h2>
-                                <span className="step-badge">Step 2 of 2</span>
+                        {/* RIGHT: Target Job (Optional) */}
+                        <div className="editor-right">
+                            <div className="target-card">
+                                <div className="card-header">
+                                    <h3>Target Job <span className="opt">(Optional)</span></h3>
+                                </div>
+                                <p className="card-hint">Tailor your resume to a specific job for better results.</p>
+
+                                <div className="field">
+                                    <label>Role</label>
+                                    <input
+                                        value={resume.jobRole}
+                                        onChange={e => update('jobRole', e.target.value)}
+                                        placeholder="e.g. Software Engineer"
+                                    />
+                                </div>
+
+                                <div className="field">
+                                    <label>Job Description</label>
+                                    <textarea
+                                        value={resume.jobDescription}
+                                        onChange={e => update('jobDescription', e.target.value)}
+                                        placeholder="Paste job description to match keywords..."
+                                        rows={4}
+                                    />
+                                </div>
+
+                                <div className="field">
+                                    <label>Key Skills Needed</label>
+                                    <input
+                                        value={resume.specifications}
+                                        onChange={e => update('specifications', e.target.value)}
+                                        placeholder="e.g. React, Python, AWS"
+                                    />
+                                </div>
                             </div>
-                            <div className="template-grid">
-                                {TEMPLATES.map(t => (
-                                    <div key={t.id} className={`template-card ${template === t.id ? 'selected' : ''}`} onClick={() => setTemplate(t.id)}>
-                                        <div className="template-preview">
-                                            <div className={`cv-mini ${t.id}`}>
-                                                <div className="mini-header"></div>
-                                                <div className="mini-line w80"></div>
-                                                <div className="mini-line w60"></div>
-                                                <div className="mini-block"></div>
-                                                <div className="mini-line w90"></div>
+
+                            {/* Keywords Match - only show when JD exists */}
+                            {atsMatches.length > 0 && (
+                                <div className="keywords-card">
+                                    <h4>Keywords Matched</h4>
+                                    <div className="keywords">
+                                        {atsMatches.slice(0, 10).map((m, i) => (
+                                            <span key={i} className={m.found ? 'found' : 'miss'}>
+                                                {m.keyword}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </section>
+                )}
+
+                {step === 'template' && (
+                    <section className="templates-page">
+                        {/* Header */}
+                        <div className="tpl-header">
+                            <button onClick={() => setStep('edit')} className="btn-back">
+                                <ChevronLeft size={20} />
+                            </button>
+                            <div className="tpl-header-content">
+                                <h2>Choose Your Template</h2>
+                                <p>Select a design that fits your style</p>
+                            </div>
+                        </div>
+
+                        {/* Template Gallery - Full A4 Frames */}
+                        <div className="tpl-gallery">
+                            <div className="tpl-gallery-scroll">
+                                {TEMPLATES.map((t, idx) => (
+                                    <div 
+                                        key={t.id} 
+                                        className={`tpl-frame ${template === t.id ? 'active' : ''} ${t.price > 0 ? 'premium' : ''}`} 
+                                        onClick={() => setTemplate(t.id)}
+                                    >
+                                        <div className="tpl-frame-inner">
+                                            {/* Live preview with actual user data */}
+                                            <div className={`tpl-cv-preview ${t.id}`}>
+                                                <div className="tcv-header">
+                                                    <h3>{resume.name || 'Your Name'}</h3>
+                                                    {resume.jobRole && <span className="tcv-role">{resume.jobRole}</span>}
+                                                    <p className="tcv-contact">{resume.email || 'email@example.com'} {resume.phone && `• ${resume.phone}`}</p>
+                                                </div>
+                                                {resume.profile && (
+                                                    <div className="tcv-section">
+                                                        <h4>Profile</h4>
+                                                        <p>{resume.profile.substring(0, 150)}...</p>
+                                                    </div>
+                                                )}
+                                                {resume.skills.length > 0 && (
+                                                    <div className="tcv-section">
+                                                        <h4>Skills</h4>
+                                                        <div className="tcv-skills">
+                                                            {resume.skills.slice(0, 6).map((s, i) => <span key={i}>{s}</span>)}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                {resume.experience && (
+                                                    <div className="tcv-section">
+                                                        <h4>Experience</h4>
+                                                        <p>{resume.experience.substring(0, 100)}...</p>
+                                                    </div>
+                                                )}
                                             </div>
+                                            {t.price > 0 && <span className="tpl-badge">₹{t.price}</span>}
+                                            {template === t.id && <div className="tpl-selected"><Check size={16} /></div>}
                                         </div>
-                                        <div className="template-info"><h3>{t.name}</h3><p>{t.desc}</p></div>
-                                        {template === t.id && <div className="template-check"><Check size={16} /></div>}
+                                        <div className="tpl-frame-info">
+                                            <span className="tpl-frame-name">{t.name}</span>
+                                            <span className="tpl-frame-type">{t.price > 0 ? 'Premium' : 'Free'}</span>
+                                        </div>
                                     </div>
                                 ))}
                             </div>
-                            <div className="cv-frame large"><CVPreview /></div>
-                            <div className="template-actions">
-                                <button className="btn secondary" onClick={() => setStep('edit')}>Back</button>
-                                <button className="btn primary" onClick={() => { stats.log('p'); setStep('preview'); }}>Continue <ChevronRight size={16} /></button>
-                            </div>
-                        </section>
-                    )
-                }
+                        </div>
 
-                {
-                    step === 'preview' && (
-                        <section className="final-preview">
-                            <h2>Your Resume</h2>
-                            <div className="cv-frame final"><CVPreview showWatermark={!paid} /></div>
-                            <p className="preview-note">{paid ? 'Ready to download' : `Free preview • ₹${CONFIG.price} removes watermark`}</p>
-                            <div className="btn-row">
-                                <button className="btn secondary" onClick={() => setStep('template')}>Back</button>
-                                {paid ? (
-                                    <button className="btn primary" onClick={downloadPDF}><Download size={16} /> Download PDF</button>
+                        {/* Bottom Action */}
+                        <div className="tpl-footer">
+                            <div className="tpl-selected-info">
+                                <span>Selected: <strong>{TEMPLATES.find(t => t.id === template)?.name}</strong></span>
+                                {TEMPLATES.find(t => t.id === template)?.price ? (
+                                    <span className="price-tag">₹{TEMPLATES.find(t => t.id === template)?.price}</span>
                                 ) : (
-                                    <>
-                                        <button className="btn outline" onClick={downloadPDF}>Download with watermark</button>
-                                        <button className="btn primary" onClick={() => setStep('pay')}>Get Clean PDF — ₹{CONFIG.price}</button>
-                                    </>
+                                    <span className="free-tag">Free</span>
                                 )}
                             </div>
-                        </section>
-                    )
-                }
+                            <button className="btn primary large" onClick={() => { stats.log('p'); setStep('preview'); }}>
+                                Continue <ChevronRight size={18} />
+                            </button>
+                        </div>
+                    </section>
+                )}
+
+                {step === 'preview' && (
+                    <section className="final-preview">
+                        <h2>Your Resume</h2>
+                        <div className="cv-frame final"><CVPreview showWatermark={!paid} /></div>
+                        <p className="preview-note">{paid ? 'Ready to download' : `Free preview • ₹${CONFIG.price} removes watermark`}</p>
+                        {downloadError && (
+                            <div className="error-toast">
+                                <AlertCircle size={14} /> {downloadError}
+                            </div>
+                        )}
+                        <div className="btn-row">
+                            <button className="btn secondary" onClick={() => setStep('template')}>Back</button>
+                            {paid ? (
+                                <button className="btn primary" onClick={handleDownload} disabled={isDownloading}>
+                                    {isDownloading ? <span className="btn-loading">Generating...</span> : <><Download size={16} /> Download PDF</>}
+                                </button>
+                            ) : (
+                                <>
+                                    <button className="btn outline" onClick={handleDownload} disabled={isDownloading}>
+                                        {isDownloading ? 'Generating...' : 'Download with watermark'}
+                                    </button>
+                                    <button className="btn primary" onClick={() => setStep('pay')}>Get Clean PDF — ₹{CONFIG.price}</button>
+                                </>
+                            )}
+                        </div>
+                    </section>
+                )}
 
                 {
                     step === 'pay' && (
@@ -657,17 +995,22 @@ export default function App() {
                     )
                 }
 
-                {
-                    step === 'done' && (
-                        <section className="done">
-                            <div className="done-icon"><Check size={28} /></div>
-                            <h2>Payment Confirmed</h2>
-                            <p>Download your clean, professional resume.</p>
-                            <button className="btn primary" onClick={downloadPDF}><Download size={16} /> Download PDF</button>
-                            <button className="btn-link" onClick={() => { setStep('home'); setPaid(false); }}>Format another resume</button>
-                        </section>
-                    )
-                }
+                {step === 'done' && (
+                    <section className="done">
+                        <div className="done-icon"><Check size={28} /></div>
+                        <h2>Payment Confirmed</h2>
+                        <p>Download your clean, professional resume.</p>
+                        {downloadError && (
+                            <div className="error-toast">
+                                <AlertCircle size={14} /> {downloadError}
+                            </div>
+                        )}
+                        <button className="btn primary" onClick={handleDownload} disabled={isDownloading}>
+                            {isDownloading ? 'Generating...' : <><Download size={16} /> Download PDF</>}
+                        </button>
+                        <button className="btn-link" onClick={() => { setStep('home'); setPaid(false); }}>Format another resume</button>
+                    </section>
+                )}
             </main >
 
             <footer><p>HexaStack Resume Formatter — Format your CV online, free preview, instant download.</p></footer>
