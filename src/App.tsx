@@ -1,14 +1,21 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Upload, Download, Check, X, FileText, ChevronRight, ChevronLeft, Pencil, Layout, Zap, Shield, Clock, Link, AlertCircle, Sparkles, Target, CheckCircle2, XCircle, Crown, Star, ZoomIn, ZoomOut } from 'lucide-react';
-import { extractKeywords, checkGrammar, matchATSKeywords, calculateATSScore, detectExperienceLevel, getMissingSections, type KeywordResult, type ATSMatch, type GrammarResult } from './ai-service';
+import { useState, useEffect, useCallback } from 'react';
+import { Download, Check, X, FileText, ChevronRight, ChevronLeft, AlertCircle, AlertTriangle, Loader, Upload, Settings } from 'lucide-react';
 import './index.css';
 
-const CONFIG = { price: 19, watermark: 'hexastack.com' };
+// ============== TYPES ==============
+interface Experience {
+    role: string;
+    company: string;
+    startDate: string;
+    endDate: string;
+    bullets: string[];
+}
 
-const stats = {
-    get: () => JSON.parse(localStorage.getItem('hxstats') || '{"u":0,"p":0,"d":0}'),
-    log: (t: 'u' | 'p' | 'd') => { const s = stats.get(); s[t]++; localStorage.setItem('hxstats', JSON.stringify(s)); }
-};
+interface Education {
+    degree: string;
+    institution: string;
+    year: string;
+}
 
 interface Resume {
     name: string;
@@ -17,1003 +24,1065 @@ interface Resume {
     linkedin: string;
     github: string;
     profile: string;
-    skills: string[];
-    experience: string;
-    education: string;
-    projects: string;
-    achievements: string;
-    jobRole: string;
-    jobDescription: string;
-    specifications: string;
+    skills: { category: string; items: string[] }[];
+    experience: Experience[];
+    education: Education[];
+    projects: { name: string; description: string; tech: string[] }[];
+    photo: string | null;
 }
 
-interface ParseLog {
-    section: string;
-    status: 'found' | 'missing' | 'error';
-    content?: string;
+interface ExtractionStatus {
+    field: string;
+    status: 'extracted' | 'missing' | 'invalid';
+    value?: string;
+    message?: string;
 }
 
-type Step = 'home' | 'loading' | 'edit' | 'template' | 'preview' | 'pay' | 'done';
+interface ValidationError {
+    field: string;
+    type: 'error' | 'warning';
+    message: string;
+    fixable: boolean;
+}
 
-const TEMPLATES = [
-    // Free Templates
-    { id: 'classic', name: 'Classic', desc: 'Clean and traditional', price: 0, atsScore: 95 },
-    { id: 'modern', name: 'Modern', desc: 'Contemporary design', price: 0, atsScore: 92 },
-    // Premium Templates
-    { id: 'executive', name: 'Executive', desc: 'Bold professional style', price: 19, atsScore: 98 },
-    { id: 'minimal', name: 'Minimal', desc: 'Simple elegance', price: 29, atsScore: 96 },
-    { id: 'creative', name: 'Creative', desc: 'Stand out design', price: 29, atsScore: 88 },
-    { id: 'premium', name: 'Premium Plus', desc: 'All features included', price: 69, atsScore: 99 },
+interface TemplateSchema {
+    id: string;
+    name: string;
+    price: number;
+    columns: 1 | 2;
+    photoRequired: boolean;
+    photoPosition: 'top-left' | 'top-right' | 'none';
+    sections: string[];
+    colors: { primary: string; accent: string; text: string };
+    bestFor: string[];
+    atsScore: number;
+}
+
+// ============== CONFIG ==============
+const CONFIG = {
+    upi: 'hexastack@upi',
+    paypal: 'paypal.me/hexastack',
+    watermark: 'hexastack.com'
+};
+
+// A4 dimensions at 96 DPI (794x1123px)
+
+// ============== TEMPLATE SCHEMAS ==============
+const TEMPLATES: TemplateSchema[] = [
+    {
+        id: 'classic',
+        name: 'Classic',
+        price: 0,
+        columns: 1,
+        photoRequired: false,
+        photoPosition: 'none',
+        sections: ['header', 'profile', 'experience', 'education', 'skills', 'projects'],
+        colors: { primary: '#1a1a1a', accent: '#334155', text: '#374151' },
+        bestFor: ['fresher', 'intern', 'professional'],
+        atsScore: 95
+    },
+    {
+        id: 'minimal',
+        name: 'Minimal',
+        price: 0,
+        columns: 1,
+        photoRequired: false,
+        photoPosition: 'none',
+        sections: ['header', 'profile', 'skills', 'experience', 'education'],
+        colors: { primary: '#111827', accent: '#6b7280', text: '#4b5563' },
+        bestFor: ['fresher', 'intern'],
+        atsScore: 98
+    },
+    {
+        id: 'modern',
+        name: 'Modern',
+        price: 19,
+        columns: 2,
+        photoRequired: true,
+        photoPosition: 'top-right',
+        sections: ['header', 'profile', 'experience', 'skills', 'projects', 'education'],
+        colors: { primary: '#1e40af', accent: '#3b82f6', text: '#1f2937' },
+        bestFor: ['professional', 'senior'],
+        atsScore: 88
+    },
+    {
+        id: 'executive',
+        name: 'Executive',
+        price: 49,
+        columns: 2,
+        photoRequired: true,
+        photoPosition: 'top-left',
+        sections: ['header', 'profile', 'experience', 'skills', 'education', 'projects'],
+        colors: { primary: '#0c4a6e', accent: '#0284c7', text: '#1e293b' },
+        bestFor: ['senior', 'professional'],
+        atsScore: 85
+    }
 ];
 
+// ============== STEPS ==============
+type Step = 'upload' | 'targeting' | 'validation' | 'template' | 'download';
+
+// ============== MAIN APP ==============
 export default function App() {
-    const [step, setStep] = useState<Step>('home');
+    const [step, setStep] = useState<Step>('upload');
+    const [processing, setProcessing] = useState(false);
+    const [processingStage, setProcessingStage] = useState(0);
+
     const [resume, setResume] = useState<Resume>({
-        name: '', email: '', phone: '', linkedin: '', github: '',
-        profile: '', skills: [], experience: '', education: '', projects: '', achievements: '',
-        jobRole: '', jobDescription: '', specifications: ''
+        name: '', email: '', phone: '', linkedin: '', github: '', profile: '',
+        skills: [], experience: [], education: [], projects: [], photo: null
     });
+
+    const [extractionStatus, setExtractionStatus] = useState<ExtractionStatus[]>([]);
+    const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
+    const [jd, setJd] = useState('');
+    const [jdAnalysis, setJdAnalysis] = useState<{ matched: string[]; missing: string[]; score: number } | null>(null);
     const [template, setTemplate] = useState('classic');
-    const [editing, setEditing] = useState<string | null>(null);
     const [paid, setPaid] = useState(false);
-    const [isAdmin, setIsAdmin] = useState(false);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
     const [showAdmin, setShowAdmin] = useState(false);
-    const [parseLog, setParseLog] = useState<ParseLog[]>([]);
-    const [jdKeywords, setJdKeywords] = useState<KeywordResult | null>(null);
-    const [atsMatches, setAtsMatches] = useState<ATSMatch[]>([]);
-    const [atsScore, setAtsScore] = useState<number>(0);
-    const [grammarResults, setGrammarResults] = useState<Record<string, GrammarResult>>({});
-    const [experienceLevel, setExperienceLevel] = useState<'fresher' | 'experienced' | 'unknown'>('unknown');
-    const [missingSections, setMissingSections] = useState<string[]>([]);
-    const [aiLoading, setAiLoading] = useState<string | null>(null);
-    const [isDownloading, setIsDownloading] = useState(false);
-    const [downloadError, setDownloadError] = useState<string | null>(null);
-    const [cvScale, setCvScale] = useState(0.7);
-    const previewContainerRef = useRef<HTMLDivElement>(null);
-    const cvPaperRef = useRef<HTMLDivElement>(null);
+    const [profileType, setProfileType] = useState<{ type: string; years: number; reason: string }>({ type: 'fresher', years: 0, reason: '' });
 
-    // Dynamic CV scaling for preview
-    useEffect(() => {
-        const calculateScale = () => {
-            if (step !== 'template') return;
-            if (!previewContainerRef.current || !cvPaperRef.current) return;
-            const containerWidth = previewContainerRef.current.clientWidth - 60;
-            const paperWidth = 595;
-            const scaleW = containerWidth / paperWidth;
-            const idealScale = Math.min(scaleW, 0.85);
-            setCvScale(Math.max(idealScale, 0.4));
-        };
-        const timeout = setTimeout(calculateScale, 150);
-        window.addEventListener('resize', calculateScale);
-        return () => {
-            window.removeEventListener('resize', calculateScale);
-            clearTimeout(timeout);
-        };
-    }, [step, template]);
+    // Stats
+    const [stats, setStats] = useState(() => JSON.parse(localStorage.getItem('hx_stats') || '{"uploads":0,"downloads":0,"paid":0}'));
+    const logStat = (key: 'uploads' | 'downloads' | 'paid') => {
+        const s = { ...stats, [key]: stats[key] + 1 };
+        setStats(s);
+        localStorage.setItem('hx_stats', JSON.stringify(s));
+    };
 
+    // Admin hotkey
     useEffect(() => {
-        const h = (e: KeyboardEvent) => { if (e.ctrlKey && e.shiftKey && e.key === 'A') { setIsAdmin(true); setShowAdmin(true); } };
+        const h = (e: KeyboardEvent) => { if (e.ctrlKey && e.shiftKey && e.key === 'A') setShowAdmin(true); };
         window.addEventListener('keydown', h);
         return () => window.removeEventListener('keydown', h);
     }, []);
 
-    // Auto-save resume to localStorage
-    useEffect(() => {
-        if (resume.name || resume.email || resume.skills.length > 0) {
-            localStorage.setItem('hexastack_resume', JSON.stringify(resume));
-        }
-    }, [resume]);
-
-    // Load saved resume on mount
-    useEffect(() => {
-        const saved = localStorage.getItem('hexastack_resume');
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved);
-                if (parsed.name || parsed.email) {
-                    setResume(parsed);
+    // ============== DATE VALIDATION ==============
+    const parseDate = (dateStr: string): Date | null => {
+        if (!dateStr) return null;
+        const formats = [
+            /(\d{2})\/(\d{4})/, // MM/YYYY
+            /(\w+)\s+(\d{4})/, // Month YYYY
+            /(\d{4})/ // YYYY
+        ];
+        for (const fmt of formats) {
+            const match = dateStr.match(fmt);
+            if (match) {
+                if (match.length === 3 && /^\d+$/.test(match[1])) {
+                    return new Date(parseInt(match[2]), parseInt(match[1]) - 1);
                 }
-            } catch (e) {
-                console.error('Failed to load saved resume');
+                if (match.length === 3) {
+                    const months: Record<string, number> = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+                    const m = months[match[1].toLowerCase().slice(0, 3)];
+                    if (m !== undefined) return new Date(parseInt(match[2]), m);
+                }
+                if (match.length === 2) {
+                    return new Date(parseInt(match[1]), 0);
+                }
             }
         }
-    }, []);
-
-    // Auto-save to localStorage
-    useEffect(() => {
-        const saved = localStorage.getItem('hexaResume');
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved);
-                setResume(prev => ({ ...prev, ...parsed }));
-            } catch (e) {
-                console.error('Failed to load saved resume');
-            }
-        }
-    }, []);
-
-    useEffect(() => {
-        if (resume.name || resume.email || resume.skills.length > 0) {
-            localStorage.setItem('hexaResume', JSON.stringify(resume));
-        }
-    }, [resume]);
-
-    // Auto-detect experience level and missing sections
-    useEffect(() => {
-        const level = detectExperienceLevel(resume);
-        setExperienceLevel(level);
-        const missing = getMissingSections(resume, level);
-        setMissingSections(missing);
-    }, [resume]);
-
-    // Extract JD keywords when job description changes
-    useEffect(() => {
-        const analyzeJD = async () => {
-            if (!resume.jobDescription.trim()) {
-                setJdKeywords(null);
-                setAtsMatches([]);
-                setAtsScore(0);
-                return;
-            }
-            setAiLoading('keywords');
-            try {
-                const keywords = await extractKeywords(resume.jobDescription);
-                setJdKeywords(keywords);
-                // Match against resume
-                const resumeText = `${resume.profile} ${resume.skills.join(' ')} ${resume.experience} ${resume.education} ${resume.projects}`;
-                const matches = matchATSKeywords(resumeText, keywords);
-                setAtsMatches(matches);
-                setAtsScore(calculateATSScore(matches));
-            } catch (err) {
-                console.error('JD analysis failed:', err);
-            }
-            setAiLoading(null);
-        };
-        const debounce = setTimeout(analyzeJD, 800);
-        return () => clearTimeout(debounce);
-    }, [resume.jobDescription, resume.profile, resume.skills, resume.experience, resume.education, resume.projects]);
-
-    // Grammar check function
-    const runGrammarCheck = async (field: string, text: string) => {
-        if (!text.trim() || text.length < 20) return;
-        setAiLoading(`grammar_${field}`);
-        try {
-            const result = await checkGrammar(text);
-            setGrammarResults(prev => ({ ...prev, [field]: result }));
-        } catch (err) {
-            console.error('Grammar check failed:', err);
-        }
-        setAiLoading(null);
+        return null;
     };
 
-    // Advanced PDF Parser
-    const parseResume = useCallback((text: string): { resume: Resume; log: ParseLog[] } => {
-        const log: ParseLog[] = [];
+    const isValidDateRange = (start: string, end: string): boolean => {
+        if (end.toLowerCase() === 'present' || end.toLowerCase() === 'current') return true;
+        const s = parseDate(start);
+        const e = parseDate(end);
+        if (!s || !e) return false;
+        return s <= e;
+    };
+
+    const calculateYearsExp = (experiences: Experience[]): number => {
+        let total = 0;
+        for (const exp of experiences) {
+            const start = parseDate(exp.startDate);
+            const end = exp.endDate.toLowerCase() === 'present' ? new Date() : parseDate(exp.endDate);
+            if (start && end) {
+                total += (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24 * 365);
+            }
+        }
+        return Math.round(total * 10) / 10;
+    };
+
+    // ============== HARD VALIDATION ==============
+    const runHardValidation = useCallback((r: Resume): ValidationError[] => {
+        const errors: ValidationError[] = [];
+
+        // Required fields
+        if (!r.name.trim()) errors.push({ field: 'name', type: 'error', message: 'Name is required', fixable: true });
+        if (!r.email.trim()) errors.push({ field: 'email', type: 'error', message: 'Email is required', fixable: true });
+        else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.email)) {
+            errors.push({ field: 'email', type: 'error', message: 'Invalid email format', fixable: true });
+        }
+
+        // Phone validation
+        if (!r.phone.trim()) {
+            errors.push({ field: 'phone', type: 'warning', message: 'Phone recommended for contact', fixable: true });
+        } else {
+            const phoneClean = r.phone.replace(/[\s\-\(\)]/g, '');
+            if (!/^\+?\d{10,15}$/.test(phoneClean)) {
+                errors.push({ field: 'phone', type: 'error', message: 'Invalid phone format', fixable: true });
+            }
+        }
+
+        // Date validation for each experience
+        for (let i = 0; i < r.experience.length; i++) {
+            const exp = r.experience[i];
+            if (!exp.startDate) {
+                errors.push({ field: `exp_${i}_start`, type: 'error', message: `${exp.role}: Missing start date`, fixable: true });
+            }
+            if (!exp.endDate) {
+                errors.push({ field: `exp_${i}_end`, type: 'error', message: `${exp.role}: Missing end date`, fixable: true });
+            }
+            if (exp.startDate && exp.endDate && !isValidDateRange(exp.startDate, exp.endDate)) {
+                errors.push({ field: `exp_${i}_date`, type: 'error', message: `${exp.role}: End date before start date`, fixable: true });
+            }
+        }
+
+        // Check for overlapping roles
+        const sortedExp = [...r.experience].sort((a, b) => {
+            const aStart = parseDate(a.startDate);
+            const bStart = parseDate(b.startDate);
+            return (aStart?.getTime() || 0) - (bStart?.getTime() || 0);
+        });
+
+        for (let i = 0; i < sortedExp.length - 1; i++) {
+            const current = sortedExp[i];
+            const next = sortedExp[i + 1];
+            const currEnd = current.endDate.toLowerCase() === 'present' ? new Date() : parseDate(current.endDate);
+            const nextStart = parseDate(next.startDate);
+            if (currEnd && nextStart && currEnd > nextStart) {
+                errors.push({
+                    field: `exp_overlap_${i}`,
+                    type: 'warning',
+                    message: `Overlapping dates: ${current.role} and ${next.role}`,
+                    fixable: false
+                });
+            }
+        }
+
+        // Experience years vs profile type
+        const years = calculateYearsExp(r.experience);
+        if (years > 10 && r.experience.some(e => /intern|trainee/i.test(e.role))) {
+            errors.push({
+                field: 'profile_mismatch',
+                type: 'error',
+                message: 'Profile shows 10+ years but has intern roles - verify accuracy',
+                fixable: false
+            });
+        }
+
+        // Skills validation
+        if (r.skills.length === 0 || r.skills.every(s => s.items.length === 0)) {
+            errors.push({ field: 'skills', type: 'warning', message: 'Add skills to improve visibility', fixable: true });
+        }
+
+        return errors;
+    }, []);
+
+    // ============== PROFILE DETECTION ==============
+    const detectProfile = useCallback((r: Resume) => {
+        const years = calculateYearsExp(r.experience);
+        const expText = r.experience.map(e => e.role + ' ' + e.bullets.join(' ')).join(' ').toLowerCase();
+
+        let type = 'fresher';
+        let reason = '';
+
+        if (years >= 8 || /director|vp|head of|principal|architect/i.test(expText)) {
+            type = 'senior';
+            reason = years >= 8 ? `${years} years of experience` : 'Leadership role detected';
+        } else if (years >= 3 || /senior|lead|manager/i.test(expText)) {
+            type = 'professional';
+            reason = years >= 3 ? `${years} years of experience` : 'Senior-level role detected';
+        } else if (/intern|trainee|apprentice/i.test(expText)) {
+            type = 'intern';
+            reason = 'Internship or training role detected';
+        } else {
+            type = 'fresher';
+            reason = years > 0 ? `${years} years experience` : 'Entry-level or recent graduate';
+        }
+
+        return { type, years, reason };
+    }, []);
+
+    // ============== RESUME PARSING ==============
+    const parseResume = useCallback((text: string): { resume: Resume; status: ExtractionStatus[] } => {
         const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        const status: ExtractionStatus[] = [];
 
-        // Helper: Find section content between keywords
-        const findSection = (startKeywords: string[], endKeywords: string[], maxLines = 15): string => {
-            const linesLower = lines.map(l => l.toLowerCase());
-            let startIdx = -1;
-
-            for (let i = 0; i < linesLower.length; i++) {
-                for (const kw of startKeywords) {
-                    if (linesLower[i].includes(kw) && linesLower[i].length < 50) {
-                        startIdx = i;
-                        break;
-                    }
-                }
-                if (startIdx !== -1) break;
-            }
-
-            if (startIdx === -1) return '';
-
-            let endIdx = Math.min(startIdx + maxLines, lines.length);
-            for (let i = startIdx + 1; i < lines.length; i++) {
-                for (const kw of endKeywords) {
-                    if (linesLower[i].includes(kw) && linesLower[i].length < 50) {
-                        endIdx = i;
-                        break;
-                    }
-                }
-                if (endIdx !== startIdx + maxLines) break;
-            }
-
-            return lines.slice(startIdx + 1, endIdx).join('\n');
-        };
-
-        // 1. Extract Name - First line that looks like a name (no special chars, 2-4 words)
+        // Name detection
         let name = '';
         for (const line of lines.slice(0, 5)) {
             const cleaned = line.replace(/[^a-zA-Z\s]/g, '').trim();
             const words = cleaned.split(/\s+/).filter(w => w.length > 1);
             if (words.length >= 2 && words.length <= 4 && cleaned.length < 50) {
-                // Check it's not a section header
-                const lower = cleaned.toLowerCase();
-                if (!['summary', 'profile', 'experience', 'education', 'skills', 'projects'].some(k => lower.includes(k))) {
+                if (!['summary', 'profile', 'experience', 'education', 'skills', 'objective'].some(k => cleaned.toLowerCase().includes(k))) {
                     name = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
                     break;
                 }
             }
         }
-        log.push({ section: 'Name', status: name ? 'found' : 'missing', content: name });
+        status.push(name ? { field: 'Name', status: 'extracted', value: name } : { field: 'Name', status: 'missing', message: 'Could not detect name' });
 
-        // 2. Extract Email
+        // Email
         const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-        const email = emailMatch ? emailMatch[0] : '';
-        log.push({ section: 'Email', status: email ? 'found' : 'missing', content: email });
-
-        // 3. Extract Phone
-        const phoneMatch = text.match(/(?:\+91[-\s]?)?[6-9]\d{9}|\+?[0-9]{1,3}[-.\s]?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}/);
-        const phone = phoneMatch ? phoneMatch[0].replace(/\s+/g, '') : '';
-        log.push({ section: 'Phone', status: phone ? 'found' : 'missing', content: phone });
-
-        // 4. Extract LinkedIn
-        const linkedinMatch = text.match(/(?:linkedin\.com\/in\/|linkedin:?\s*)[a-zA-Z0-9_-]+/i);
-        const linkedin = linkedinMatch ?
-            (linkedinMatch[0].includes('linkedin.com') ? linkedinMatch[0] : `linkedin.com/in/${linkedinMatch[0].split(/\s+/).pop()}`) : '';
-        log.push({ section: 'LinkedIn', status: linkedin ? 'found' : 'missing', content: linkedin });
-
-        // 5. Extract GitHub
-        const githubMatch = text.match(/(?:github\.com\/|github:?\s*)[a-zA-Z0-9_-]+/i);
-        const github = githubMatch ?
-            (githubMatch[0].includes('github.com') ? githubMatch[0] : `github.com/${githubMatch[0].split(/\s+/).pop()}`) : '';
-        log.push({ section: 'GitHub', status: github ? 'found' : 'missing', content: github });
-
-        // 6. Extract Profile/Summary
-        const profile = findSection(
-            ['summary', 'profile', 'objective', 'about me', 'professional summary', 'career objective'],
-            ['experience', 'work', 'skills', 'education', 'projects', 'technical'],
-            8
-        );
-        log.push({ section: 'Profile', status: profile ? 'found' : 'missing' });
-
-        // 7. Extract Skills - More comprehensive
-        const skillsSection = findSection(
-            ['skills', 'technical skills', 'technologies', 'competencies', 'tools', 'programming'],
-            ['experience', 'work', 'education', 'projects', 'certifications', 'achievements'],
-            12
-        );
-
-        // Also find inline skills
-        const skillPatterns = [
-            /(?:python|java|javascript|typescript|react|angular|vue|node|express|mongodb|sql|postgresql|mysql|aws|azure|gcp|docker|kubernetes|git|html|css|c\+\+|c#|ruby|php|swift|kotlin|go|rust|scala|r\b|matlab|tensorflow|pytorch|keras|scikit-learn|pandas|numpy|flask|django|spring|laravel|rails)/gi
-        ];
-
-        let allSkills = new Set<string>();
-
-        // From skills section
-        if (skillsSection) {
-            skillsSection.split(/[,•|\n\/]/).forEach(s => {
-                const skill = s.trim();
-                if (skill.length > 1 && skill.length < 35 && !skill.match(/^\d+$/)) {
-                    allSkills.add(skill);
-                }
-            });
+        const email = emailMatch?.[0] || '';
+        if (email) {
+            status.push({ field: 'Email', status: 'extracted', value: email });
+        } else {
+            status.push({ field: 'Email', status: 'missing', message: 'No email found' });
         }
 
-        // From pattern matching
-        for (const pattern of skillPatterns) {
-            const matches = text.match(pattern);
-            if (matches) {
-                matches.forEach(m => allSkills.add(m));
+        // Phone - improved detection
+        const phonePatterns = [
+            /(?:\+91[-\s]?)?[6-9]\d{9}/,
+            /\+?[0-9]{1,3}[-.\s]?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}/,
+            /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}/
+        ];
+        let phone = '';
+        for (const pattern of phonePatterns) {
+            const match = text.match(pattern);
+            if (match) { phone = match[0].replace(/\s+/g, ''); break; }
+        }
+        if (phone) {
+            status.push({ field: 'Phone', status: 'extracted', value: phone });
+        } else {
+            status.push({ field: 'Phone', status: 'missing', message: 'No phone number found' });
+        }
+
+        // LinkedIn & GitHub
+        const linkedin = text.match(/linkedin\.com\/in\/[a-zA-Z0-9_-]+/i)?.[0] || '';
+        const github = text.match(/github\.com\/[a-zA-Z0-9_-]+/i)?.[0] || '';
+        if (linkedin) status.push({ field: 'LinkedIn', status: 'extracted', value: linkedin });
+        if (github) status.push({ field: 'GitHub', status: 'extracted', value: github });
+
+        // Section finder helper
+        const findSection = (keywords: string[], endKeywords: string[], maxLines = 20): string[] => {
+            const lower = lines.map(l => l.toLowerCase());
+            let start = -1;
+            for (let i = 0; i < lower.length; i++) {
+                if (keywords.some(k => lower[i].includes(k) && lower[i].length < 50)) { start = i; break; }
+            }
+            if (start === -1) return [];
+            let end = Math.min(start + maxLines, lines.length);
+            for (let i = start + 1; i < lines.length; i++) {
+                if (endKeywords.some(k => lower[i].includes(k) && lower[i].length < 50)) { end = i; break; }
+            }
+            return lines.slice(start + 1, end);
+        };
+
+        // Profile
+        const profileLines = findSection(['summary', 'profile', 'objective', 'about me'], ['experience', 'work', 'skills', 'education'], 6);
+        const profile = profileLines.join(' ').slice(0, 500);
+        if (profile) status.push({ field: 'Profile', status: 'extracted' });
+
+        // Skills
+        const skillLines = findSection(['skills', 'technical skills', 'technologies', 'competencies'], ['experience', 'work', 'education', 'projects'], 15);
+        const skillText = skillLines.join(' ');
+
+        const langMatch = skillText.match(/\b(python|java|javascript|typescript|c\+\+|c#|go|rust|ruby|php|swift|kotlin|scala|r\b|sql)\b/gi) || [];
+        const fwMatch = skillText.match(/\b(react|angular|vue|node|express|django|flask|spring|laravel|rails|nextjs|next\.js)\b/gi) || [];
+        const toolMatch = skillText.match(/\b(docker|kubernetes|aws|azure|gcp|git|jenkins|mongodb|postgresql|mysql|redis|terraform)\b/gi) || [];
+
+        const skills: { category: string; items: string[] }[] = [];
+        const uniqLangs = [...new Set(langMatch.map(s => s.toLowerCase()))];
+        const uniqFws = [...new Set(fwMatch.map(s => s.toLowerCase()))];
+        const uniqTools = [...new Set(toolMatch.map(s => s.toLowerCase()))];
+
+        if (uniqLangs.length) skills.push({ category: 'Languages', items: uniqLangs });
+        if (uniqFws.length) skills.push({ category: 'Frameworks', items: uniqFws });
+        if (uniqTools.length) skills.push({ category: 'Tools', items: uniqTools });
+
+        if (skills.length > 0) {
+            status.push({ field: 'Skills', status: 'extracted', value: `${uniqLangs.length + uniqFws.length + uniqTools.length} skills found` });
+        } else {
+            status.push({ field: 'Skills', status: 'missing', message: 'No technical skills detected' });
+        }
+
+        // Experience
+        const expLines = findSection(['experience', 'work experience', 'professional experience', 'employment'], ['education', 'skills', 'projects', 'certifications'], 40);
+        const experience: Experience[] = [];
+        let currentExp: Experience | null = null;
+
+        for (const line of expLines) {
+            // Date detection
+            const datePattern = /(\d{2}\/\d{4}|\w+\s+\d{4}|\d{4})\s*[-–to]+\s*(\d{2}\/\d{4}|\w+\s+\d{4}|\d{4}|present|current)/i;
+            const dateMatch = line.match(datePattern);
+
+            if (dateMatch || /^(software|senior|junior|lead|manager|developer|engineer|analyst|designer|intern|associate)/i.test(line)) {
+                if (currentExp && currentExp.role) experience.push(currentExp);
+
+                const parts = line.split(/\s+[-–|at@]\s+/);
+                currentExp = {
+                    role: parts[0]?.replace(datePattern, '').trim() || line.replace(datePattern, '').trim(),
+                    company: parts[1]?.replace(datePattern, '').trim() || '',
+                    startDate: dateMatch?.[1] || '',
+                    endDate: dateMatch?.[2] || '',
+                    bullets: []
+                };
+            } else if (currentExp && line.length > 15) {
+                // Clean bullet point
+                const bullet = line.replace(/^[-•*]\s*/, '').trim();
+                if (bullet.length > 10) currentExp.bullets.push(bullet);
             }
         }
+        if (currentExp && currentExp.role) experience.push(currentExp);
 
-        const skills = Array.from(allSkills).slice(0, 20);
-        log.push({ section: 'Skills', status: skills.length > 0 ? 'found' : 'missing', content: `${skills.length} skills found` });
+        if (experience.length > 0) {
+            status.push({ field: 'Experience', status: 'extracted', value: `${experience.length} roles found` });
+        } else {
+            status.push({ field: 'Experience', status: 'missing', message: 'No work experience detected' });
+        }
 
-        // 8. Extract Experience
-        const experience = findSection(
-            ['experience', 'work experience', 'professional experience', 'employment', 'work history'],
-            ['education', 'skills', 'projects', 'certifications', 'achievements', 'awards'],
-            20
-        );
-        log.push({ section: 'Experience', status: experience ? 'found' : 'missing' });
+        // Education
+        const eduLines = findSection(['education', 'academic', 'qualification', 'degree'], ['skills', 'projects', 'experience', 'certifications'], 12);
+        const education: Education[] = [];
+        for (const line of eduLines) {
+            if (/bachelor|master|b\.?tech|m\.?tech|bsc|msc|mba|phd|degree|university|college|institute/i.test(line)) {
+                education.push({
+                    degree: line.match(/(bachelor|master|b\.?tech|m\.?tech|b\.?e|m\.?e|bsc|msc|mba|bba|phd|diploma)[^,]*/i)?.[0] || line,
+                    institution: line.match(/(university|college|institute|school)[^,]*/i)?.[0] || '',
+                    year: line.match(/\d{4}/)?.[0] || ''
+                });
+            }
+        }
+        if (education.length > 0) {
+            status.push({ field: 'Education', status: 'extracted', value: `${education.length} entries found` });
+        } else {
+            status.push({ field: 'Education', status: 'missing', message: 'No education found' });
+        }
 
-        // 9. Extract Education
-        const education = findSection(
-            ['education', 'academic', 'qualification', 'degree'],
-            ['skills', 'projects', 'certifications', 'experience', 'achievements', 'awards'],
-            12
-        );
-        log.push({ section: 'Education', status: education ? 'found' : 'missing' });
+        // Projects
+        const projLines = findSection(['projects', 'personal projects', 'portfolio', 'key projects'], ['education', 'skills', 'achievements', 'certifications'], 25);
+        const projects: { name: string; description: string; tech: string[] }[] = [];
+        let currentProj: { name: string; description: string; tech: string[] } | null = null;
 
-        // 10. Extract Projects
-        const projects = findSection(
-            ['projects', 'personal projects', 'academic projects', 'portfolio'],
-            ['education', 'skills', 'certifications', 'achievements', 'awards', 'references'],
-            20
-        );
-        log.push({ section: 'Projects', status: projects ? 'found' : 'missing' });
-
-        // 11. Extract Achievements
-        const achievements = findSection(
-            ['achievements', 'awards', 'certifications', 'honors', 'accomplishments'],
-            ['education', 'skills', 'projects', 'references', 'interests'],
-            10
-        );
-        log.push({ section: 'Achievements', status: achievements ? 'found' : 'missing' });
+        for (const line of projLines) {
+            if (line.length < 50 && !line.includes('.') && !/^\d/.test(line)) {
+                if (currentProj) projects.push(currentProj);
+                currentProj = { name: line, description: '', tech: [] };
+            } else if (currentProj) {
+                currentProj.description += line + ' ';
+                const techMatch = line.match(/\b(react|node|python|java|mongodb|postgresql|aws|docker|typescript|javascript)\b/gi);
+                if (techMatch) currentProj.tech.push(...techMatch);
+            }
+        }
+        if (currentProj) projects.push(currentProj);
+        if (projects.length > 0) {
+            status.push({ field: 'Projects', status: 'extracted', value: `${projects.length} projects found` });
+        }
 
         return {
-            resume: {
-                name, email, phone, linkedin, github, profile, skills, experience, education, projects, achievements,
-                jobRole: '', jobDescription: '', specifications: ''
-            },
-            log
+            resume: { name, email, phone, linkedin, github, profile, skills, experience, education, projects, photo: null },
+            status
         };
     }, []);
 
-    // Handle Upload with better error handling
+    // ============== FILE UPLOAD ==============
     const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
+        if (file.type !== 'application/pdf') { alert('Please upload a PDF file'); return; }
+        if (file.size > 10 * 1024 * 1024) { alert('File too large. Max 10MB'); return; }
 
-        if (file.type !== 'application/pdf') {
-            alert('Please upload a PDF file');
-            return;
-        }
-
-        if (file.size > 5 * 1024 * 1024) {
-            alert('File too large. Max 5MB');
-            return;
-        }
-
-        stats.log('u');
-        setStep('loading');
+        logStat('uploads');
+        setProcessing(true);
+        setProcessingStage(0);
 
         try {
+            // Stage 1: Reading
             const pdfjsLib = await import('pdfjs-dist');
             pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs';
+            setProcessingStage(1);
 
             const buf = await file.arrayBuffer();
             const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-
-            console.log(`PDF loaded: ${pdf.numPages} pages`);
+            setTotalPages(pdf.numPages);
 
             let fullText = '';
-
-            // Extract from ALL pages
-            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-                const page = await pdf.getPage(pageNum);
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
                 const content = await page.getTextContent();
-
-                // Better text extraction with spacing
                 let pageText = '';
                 let lastY = 0;
-
                 for (const item of content.items as any[]) {
                     if (item.str) {
-                        // Add newline if Y position changed significantly
-                        if (lastY && Math.abs(item.transform[5] - lastY) > 5) {
-                            pageText += '\n';
-                        }
+                        if (lastY && Math.abs(item.transform[5] - lastY) > 5) pageText += '\n';
                         pageText += item.str + ' ';
                         lastY = item.transform[5];
                     }
                 }
-
-                fullText += pageText + '\n\n--- PAGE BREAK ---\n\n';
+                fullText += pageText + '\n\n';
             }
 
-            const { resume: parsed, log } = parseResume(fullText);
+            // Stage 2: Extracting
+            setProcessingStage(2);
+            await new Promise(r => setTimeout(r, 200));
+            const { resume: parsed, status } = parseResume(fullText);
             setResume(parsed);
-            setParseLog(log);
-            setStep('edit');
+            setExtractionStatus(status);
+
+            // Stage 3: Analyzing
+            setProcessingStage(3);
+            await new Promise(r => setTimeout(r, 200));
+            const profile = detectProfile(parsed);
+            setProfileType(profile);
+
+            // Stage 4: Validating
+            setProcessingStage(4);
+            await new Promise(r => setTimeout(r, 200));
+            const errors = runHardValidation(parsed);
+            setValidationErrors(errors);
+
+            setProcessing(false);
+            setStep('targeting');
 
         } catch (err) {
             console.error('PDF Error:', err);
-            alert('Error reading PDF. Please try another file or check the format.');
-            setStep('home');
+            alert('Error reading PDF. Try a different file.');
+            setProcessing(false);
         }
     };
 
-    const update = (k: keyof Resume, v: string | string[]) => setResume(p => ({ ...p, [k]: v }));
+    // ============== JD ANALYSIS ==============
+    useEffect(() => {
+        if (!jd.trim()) { setJdAnalysis(null); return; }
 
+        const analyze = () => {
+            const resumeText = [
+                resume.profile,
+                resume.skills.flatMap(s => s.items).join(' '),
+                resume.experience.map(e => e.bullets.join(' ')).join(' '),
+                resume.projects.map(p => p.description).join(' ')
+            ].join(' ').toLowerCase();
+
+            // Extract JD skills
+            const jdSkills = (jd.match(/\b(python|java|javascript|typescript|react|angular|vue|node|mongodb|sql|aws|azure|docker|kubernetes|git|agile|scrum|ci\/cd|rest|api|microservices|html|css|tensorflow|pytorch|flask|django|spring)\b/gi) || [])
+                .map(s => s.toLowerCase());
+            const uniqueJdSkills = [...new Set(jdSkills)];
+
+            const matched = uniqueJdSkills.filter(s => resumeText.includes(s));
+            const missing = uniqueJdSkills.filter(s => !resumeText.includes(s));
+            const score = uniqueJdSkills.length > 0 ? Math.round((matched.length / uniqueJdSkills.length) * 100) : 0;
+
+            setJdAnalysis({ matched, missing, score });
+        };
+
+        const t = setTimeout(analyze, 500);
+        return () => clearTimeout(t);
+    }, [jd, resume]);
+
+    // ============== PROCEED TO VALIDATION ==============
+    const proceedToValidation = () => {
+        const errors = runHardValidation(resume);
+        setValidationErrors(errors);
+        setStep('validation');
+    };
+
+    // ============== PDF DOWNLOAD ==============
     const downloadPDF = async () => {
         const { jsPDF } = await import('jspdf');
         const doc = new jsPDF('p', 'mm', 'a4');
-        const pageWidth = 210;
-        const margin = 20;
-        const contentWidth = pageWidth - (margin * 2);
+        const w = 210, m = 20, cw = w - m * 2;
         let y = 25;
 
-        // Template-specific colors
-        const templateColors: Record<string, { primary: string; accent: string }> = {
-            classic: { primary: '#1a1a1a', accent: '#333333' },
-            modern: { primary: '#0f172a', accent: '#1e40af' },
-            executive: { primary: '#111827', accent: '#6366f1' },
-            minimal: { primary: '#374151', accent: '#6b7280' },
-            creative: { primary: '#7c3aed', accent: '#a855f7' },
-            premium: { primary: '#0c4a6e', accent: '#0284c7' },
-        };
+        const tpl = TEMPLATES.find(t => t.id === template) || TEMPLATES[0];
 
-        const colors = templateColors[template] || templateColors.classic;
-
-        // Name - Large and bold
+        // Name
         doc.setFont('helvetica', 'bold');
-        doc.setFontSize(24);
-        doc.setTextColor(colors.primary);
-        doc.text(resume.name || 'Your Name', margin, y);
-        y += 9;
+        doc.setFontSize(22);
+        doc.setTextColor(tpl.colors.primary);
+        doc.text(resume.name || 'Your Name', m, y);
+        y += 8;
 
-        // Job Role
-        if (resume.jobRole) {
-            doc.setFont('helvetica', 'normal');
-            doc.setFontSize(13);
-            doc.setTextColor(colors.accent);
-            doc.text(resume.jobRole, margin, y);
-            y += 7;
-        }
-
-        // Contact line
+        // Contact
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(9);
         doc.setTextColor(100);
-        const contactParts = [resume.email, resume.phone].filter(Boolean);
-        if (contactParts.length) {
-            doc.text(contactParts.join('  •  '), margin, y);
-            y += 5;
-        }
+        const contact = [resume.email, resume.phone].filter(Boolean).join(' | ');
+        if (contact) { doc.text(contact, m, y); y += 4; }
+        const links = [resume.linkedin, resume.github].filter(Boolean).join(' | ');
+        if (links) { doc.text(links, m, y); y += 5; }
 
-        // Links
-        if (resume.linkedin || resume.github) {
-            const links = [resume.linkedin, resume.github].filter(Boolean);
-            doc.setTextColor(70, 130, 180);
-            doc.text(links.join('  •  '), margin, y);
-            y += 6;
-        }
-
-        y += 4;
-
-        // Divider line
+        y += 3;
         doc.setDrawColor(200);
-        doc.setLineWidth(0.3);
-        doc.line(margin, y, pageWidth - margin, y);
+        doc.line(m, y, w - m, y);
         y += 8;
-
-        doc.setTextColor(0);
 
         const addSection = (title: string, content: string) => {
             if (!content) return;
-            
-            // Check if we need a new page
-            if (y > 265) { 
-                doc.addPage(); 
-                y = 20; 
-            }
-
-            // Section header
+            if (y > 265) { doc.addPage(); y = 20; }
             doc.setFont('helvetica', 'bold');
-            doc.setFontSize(11);
-            doc.setTextColor(colors.primary);
-            doc.text(title.toUpperCase(), margin, y);
-            y += 1;
-
-            // Underline
-            doc.setDrawColor(colors.accent);
-            doc.setLineWidth(0.5);
-            doc.line(margin, y + 1, margin + 25, y + 1);
-            y += 6;
-
-            // Content
-            doc.setFont('helvetica', 'normal');
             doc.setFontSize(10);
-            doc.setTextColor(50);
-            
-            const lines = doc.splitTextToSize(content, contentWidth);
-            
+            doc.setTextColor(tpl.colors.primary);
+            doc.text(title.toUpperCase(), m, y);
+            y += 5;
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(9);
+            doc.setTextColor(60);
+            const lines = doc.splitTextToSize(content, cw);
             for (const line of lines) {
-                if (y > 275) {
-                    doc.addPage();
-                    y = 20;
-                }
-                doc.text(line, margin, y);
-                y += 5;
+                if (y > 275) { doc.addPage(); y = 20; }
+                doc.text(line, m, y);
+                y += 4;
             }
-            
-            y += 6;
+            y += 5;
         };
 
-        if (resume.profile) addSection('Profile', resume.profile);
-        if (resume.skills.length) addSection('Skills', resume.skills.join('  •  '));
-        if (resume.experience) addSection('Experience', resume.experience);
-        if (resume.education) addSection('Education', resume.education);
-        if (resume.projects) addSection('Projects', resume.projects);
-        if (resume.achievements) addSection('Achievements', resume.achievements);
+        // Sections based on template order
+        for (const sec of tpl.sections) {
+            switch (sec) {
+                case 'profile': addSection('Profile', resume.profile); break;
+                case 'skills':
+                    addSection('Skills', resume.skills.map(s => s.category + ': ' + s.items.join(', ')).join('\n'));
+                    break;
+                case 'experience':
+                    for (const exp of resume.experience) {
+                        if (y > 260) { doc.addPage(); y = 20; }
+                        doc.setFont('helvetica', 'bold');
+                        doc.setFontSize(10);
+                        doc.setTextColor(40);
+                        doc.text(exp.role + (exp.company ? ' at ' + exp.company : ''), m, y);
+                        y += 4;
+                        doc.setFont('helvetica', 'normal');
+                        doc.setFontSize(8);
+                        doc.setTextColor(100);
+                        doc.text(exp.startDate + ' - ' + exp.endDate, m, y);
+                        y += 4;
+                        doc.setFontSize(9);
+                        doc.setTextColor(60);
+                        for (const bullet of exp.bullets.slice(0, 4)) {
+                            const bulletLines = doc.splitTextToSize('• ' + bullet, cw);
+                            for (const bl of bulletLines) {
+                                if (y > 275) { doc.addPage(); y = 20; }
+                                doc.text(bl, m, y);
+                                y += 4;
+                            }
+                        }
+                        y += 3;
+                    }
+                    break;
+                case 'education':
+                    addSection('Education', resume.education.map(e => e.degree + (e.institution ? ', ' + e.institution : '') + (e.year ? ' (' + e.year + ')' : '')).join('\n'));
+                    break;
+                case 'projects':
+                    addSection('Projects', resume.projects.map(p => p.name + ': ' + p.description.slice(0, 150)).join('\n\n'));
+                    break;
+            }
+        }
 
-        // Watermark for unpaid
         if (!paid) {
             doc.setFontSize(8);
             doc.setTextColor(180);
-            doc.text(CONFIG.watermark, pageWidth / 2, 290, { align: 'center' });
+            doc.text(CONFIG.watermark, w / 2, 290, { align: 'center' });
         }
 
-        doc.save(`${resume.name.replace(/\s+/g, '_') || 'resume'}.pdf`);
-        stats.log('d');
+        doc.save((resume.name.replace(/\s+/g, '_') || 'resume') + '.pdf');
+        logStat('downloads');
     };
 
-    // Validation function
-    const validateResume = (): { isValid: boolean; errors: string[] } => {
-        const errors: string[] = [];
-        if (!resume.name.trim()) errors.push('Name is required');
-        if (!resume.email.trim()) errors.push('Email is required');
-        if (resume.skills.length === 0) errors.push('At least one skill is required');
-        return { isValid: errors.length === 0, errors };
-    };
+    // ============== A4 PREVIEW COMPONENT ==============
+    const A4Preview = () => {
+        const tpl = TEMPLATES.find(t => t.id === template) || TEMPLATES[0];
 
-    // Download with validation
-    const handleDownload = async () => {
-        const { isValid, errors } = validateResume();
-        if (!isValid) {
-            setDownloadError(errors.join('. '));
-            setTimeout(() => setDownloadError(null), 4000);
-            return;
-        }
-        setIsDownloading(true);
-        setDownloadError(null);
-        try {
-            await downloadPDF();
-        } catch (err) {
-            setDownloadError('Failed to generate PDF. Please try again.');
-        }
-        setIsDownloading(false);
-    };
-
-    const sectionGroups: { personal: { key: keyof Resume; label: string; multi?: boolean }[]; content: { key: keyof Resume; label: string; multi?: boolean }[] } = {
-        personal: [
-            { key: 'name', label: 'Full Name' },
-            { key: 'email', label: 'Email' },
-            { key: 'phone', label: 'Phone' },
-            { key: 'linkedin', label: 'LinkedIn' },
-            { key: 'github', label: 'GitHub' },
-        ],
-        content: [
-            { key: 'profile', label: 'Profile Summary', multi: true },
-            { key: 'experience', label: 'Experience', multi: true },
-            { key: 'education', label: 'Education', multi: true },
-            { key: 'skills', label: 'Skills' },
-            { key: 'projects', label: 'Projects', multi: true },
-            { key: 'achievements', label: 'Achievements', multi: true },
-        ]
-    };
-
-    const foundCount = parseLog.filter(l => l.status === 'found').length;
-    const totalCount = parseLog.length;
-
-    const CVPreview = ({ showWatermark = true }: { showWatermark?: boolean }) => (
-        <div className={`cv-paper ${template}`}>
-            <div className="cv-page">
-                <div className="cv-header">
-                    <h1>{resume.name || 'Your Name'}</h1>
-                    {resume.jobRole && <p className="cv-job-title">{resume.jobRole}</p>}
-                    <p className="cv-contact-line">
-                        {resume.email || 'email@example.com'}
-                        {resume.phone && ` • ${resume.phone}`}
-                    </p>
-                    {(resume.linkedin || resume.github) && (
-                        <p className="cv-links">
-                            {resume.linkedin && <span>{resume.linkedin}</span>}
-                            {resume.github && <span>{resume.github}</span>}
-                        </p>
-                    )}
+        return (
+            <div className="a4-preview-wrap">
+                <div className="page-tabs">
+                    {Array.from({ length: totalPages }, (_, i) => (
+                        <button key={i} className={currentPage === i + 1 ? 'active' : ''} onClick={() => setCurrentPage(i + 1)}>
+                            Page {i + 1}
+                        </button>
+                    ))}
                 </div>
-                <div className="cv-body">
-                    {resume.profile && (
-                        <div className="cv-section">
-                            <h2>Profile</h2>
-                            <p>{resume.profile}</p>
-                        </div>
-                    )}
-                    {resume.skills.length > 0 && (
-                        <div className="cv-section">
-                            <h2>Skills</h2>
-                            <div className="cv-skills">
-                                {resume.skills.map((s, i) => <span key={i}>{s}</span>)}
+                <div className="a4-frame">
+                    <div className={`a4-paper ${template}`} style={{ '--primary': tpl.colors.primary, '--accent': tpl.colors.accent } as React.CSSProperties}>
+                        {resume.photo && tpl.photoPosition !== 'none' && (
+                            <div className={`cv-photo ${tpl.photoPosition}`}>
+                                <img src={resume.photo} alt="" />
                             </div>
+                        )}
+                        <div className="cv-header">
+                            <h1 style={{ color: tpl.colors.primary }}>{resume.name || 'Your Name'}</h1>
+                            <p className="cv-contact">{[resume.email, resume.phone].filter(Boolean).join(' | ')}</p>
+                            <p className="cv-links">{[resume.linkedin, resume.github].filter(Boolean).join(' | ')}</p>
                         </div>
-                    )}
-                    {resume.experience && (
-                        <div className="cv-section">
-                            <h2>Experience</h2>
-                            <div className="cv-text">{resume.experience.split('\n').map((line, i) => (
-                                <p key={i} className={line.match(/^[A-Z].*\d{4}/) ? 'cv-entry-title' : ''}>{line}</p>
-                            ))}</div>
-                        </div>
-                    )}
-                    {resume.education && (
-                        <div className="cv-section">
-                            <h2>Education</h2>
-                            <div className="cv-text">{resume.education.split('\n').map((line, i) => (
-                                <p key={i}>{line}</p>
-                            ))}</div>
-                        </div>
-                    )}
-                    {resume.projects && (
-                        <div className="cv-section">
-                            <h2>Projects</h2>
-                            <div className="cv-text">{resume.projects.split('\n').map((line, i) => (
-                                <p key={i}>{line}</p>
-                            ))}</div>
-                        </div>
-                    )}
-                    {resume.achievements && (
-                        <div className="cv-section">
-                            <h2>Achievements</h2>
-                            <div className="cv-text">{resume.achievements.split('\n').map((line, i) => (
-                                <p key={i}>{line}</p>
-                            ))}</div>
-                        </div>
-                    )}
-                </div>
-                {showWatermark && !paid && <div className="cv-watermark">{CONFIG.watermark}</div>}
-            </div>
-        </div>
-    );
-
-    const renderSectionGroup = (title: string, items: { key: keyof Resume; label: string; multi?: boolean }[]) => (
-        <div className="section-group">
-            <h3 className="group-title">{title}</h3>
-            <div className="group-items">
-                {items.map((sec) => {
-                    const key = sec.key;
-                    const val = key === 'skills' ? resume.skills.join(', ') : String(resume[key] || '');
-                    const isEmpty = key === 'skills' ? resume.skills.length === 0 : !val;
-                    const isOpen = editing === key;
-                    const grammarResult = grammarResults[key];
-
-                    return (
-                        <div key={sec.key} className={`sec ${isOpen ? 'open' : ''} ${isEmpty ? 'empty' : 'filled'}`}>
-                            <button className="sec-head" onClick={() => setEditing(isOpen ? null : sec.key)}>
-                                <span className="sec-label">
-                                    <div className={`status-indicator ${isEmpty ? 'missing' : 'found'}`}></div>
-                                    {sec.label}
-                                    {(sec.key === 'linkedin' || sec.key === 'github') && <Link size={12} className="link-icon" />}
-                                    {grammarResult?.hasErrors && <AlertCircle size={12} className="grammar-warning" />}
-                                </span>
-                                <Pencil size={14} className="edit-icon" />
-                            </button>
-                            {isOpen && (
-                                <div className="sec-body">
-                                    {sec.key === 'skills' ? (
-                                        <div className="input-wrapper">
-                                            <input
-                                                value={resume.skills.join(', ')}
-                                                onChange={e => update('skills', e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
-                                                placeholder="e.g. React, Node.js, Python"
-                                            />
-                                            <small className="field-hint">Separate skills with commas</small>
+                        <div className="cv-body">
+                            {resume.profile && (
+                                <div className="cv-section">
+                                    <h2>Profile</h2>
+                                    <p>{resume.profile}</p>
+                                </div>
+                            )}
+                            {resume.skills.length > 0 && (
+                                <div className="cv-section">
+                                    <h2>Skills</h2>
+                                    {resume.skills.map((s, i) => (
+                                        <div key={i} className="skill-row">
+                                            <span className="skill-cat">{s.category}:</span>
+                                            <span className="skill-items">{s.items.join(', ')}</span>
                                         </div>
-                                    ) : sec.multi ? (
-                                        <div className="input-wrapper">
-                                            <textarea
-                                                value={val}
-                                                onChange={e => update(sec.key, e.target.value)}
-                                                onBlur={() => sec.multi && runGrammarCheck(sec.key, val)}
-                                                rows={6}
-                                                placeholder={`Enter ${sec.label.toLowerCase()}...`}
-                                            />
-                                            {aiLoading === `grammar_${sec.key}` && <small className="field-hint loading">Checking grammar...</small>}
-                                            {grammarResult?.hasErrors && (
-                                                <div className="grammar-suggestions">
-                                                    <small><Sparkles size={12} /> Suggestions:</small>
-                                                    {grammarResult.corrections.slice(0, 3).map((c, i) => (
-                                                        <span key={i} className="grammar-fix">"{c.original}" → "{c.suggestion}"</span>
-                                                    ))}
-                                                </div>
-                                            )}
+                                    ))}
+                                </div>
+                            )}
+                            {resume.experience.length > 0 && (
+                                <div className="cv-section">
+                                    <h2>Experience</h2>
+                                    {resume.experience.slice(0, 3).map((exp, i) => (
+                                        <div key={i} className="exp-entry">
+                                            <div className="exp-head">
+                                                <strong>{exp.role}</strong>
+                                                <span className="exp-date">{exp.startDate} - {exp.endDate}</span>
+                                            </div>
+                                            <div className="exp-company">{exp.company}</div>
+                                            <ul>
+                                                {exp.bullets.slice(0, 2).map((b, j) => <li key={j}>{b.slice(0, 80)}{b.length > 80 ? '...' : ''}</li>)}
+                                            </ul>
                                         </div>
-                                    ) : (
-                                        <input
-                                            value={val}
-                                            onChange={e => update(sec.key, e.target.value)}
-                                            placeholder={`Enter ${sec.label.toLowerCase()}...`}
-                                        />
-                                    )}
+                                    ))}
+                                </div>
+                            )}
+                            {resume.education.length > 0 && (
+                                <div className="cv-section">
+                                    <h2>Education</h2>
+                                    {resume.education.map((e, i) => (
+                                        <div key={i} className="edu-entry">
+                                            <strong>{e.degree}</strong>
+                                            <span>{e.institution} {e.year && `(${e.year})`}</span>
+                                        </div>
+                                    ))}
                                 </div>
                             )}
                         </div>
-                    );
-                })}
+                        {!paid && <div className="cv-watermark">{CONFIG.watermark}</div>}
+                    </div>
+                </div>
             </div>
-        </div>
-    );
+        );
+    };
 
+    // ============== RENDER ==============
     return (
         <div className="app">
-            {step !== 'edit' && (
+            {/* HEADER */}
+            {step !== 'upload' && (
                 <header>
-                    <div className="logo" onClick={() => setStep('home')}><FileText size={18} /><span>HexaStack</span></div>
-                    {isAdmin && <button className="admin-btn" onClick={() => setShowAdmin(true)}>Admin</button>}
+                    <div className="logo" onClick={() => setStep('upload')}>
+                        <FileText size={18} />
+                        <span>HexaStack</span>
+                    </div>
+                    <div className="step-nav">
+                        {['Upload', 'Target', 'Validate', 'Template', 'Download'].map((s, i) => {
+                            const steps: Step[] = ['upload', 'targeting', 'validation', 'template', 'download'];
+                            const isActive = steps.indexOf(step) >= i;
+                            return (
+                                <div key={s} className={`step-item ${isActive ? 'active' : ''}`}>
+                                    <div className="step-num">{i + 1}</div>
+                                    <span>{s}</span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <button className="icon-btn" onClick={() => setShowAdmin(true)}><Settings size={18} /></button>
                 </header>
             )}
 
+            {/* ADMIN MODAL */}
             {showAdmin && (
                 <div className="overlay" onClick={() => setShowAdmin(false)}>
                     <div className="modal" onClick={e => e.stopPropagation()}>
-                        <div className="modal-head"><h3>Dashboard</h3><button onClick={() => setShowAdmin(false)}><X size={16} /></button></div>
+                        <div className="modal-head">
+                            <h3>Admin Dashboard</h3>
+                            <button onClick={() => setShowAdmin(false)}><X size={18} /></button>
+                        </div>
                         <div className="modal-body">
-                            <div className="stat-row">
-                                <div className="stat"><span>{stats.get().u}</span><small>Uploads</small></div>
-                                <div className="stat"><span>{stats.get().p}</span><small>Previews</small></div>
-                                <div className="stat"><span>{stats.get().d}</span><small>Downloads</small></div>
+                            <div className="stat-grid">
+                                <div className="stat"><span>{stats.uploads}</span><small>Uploads</small></div>
+                                <div className="stat"><span>{stats.downloads}</span><small>Downloads</small></div>
+                                <div className="stat"><span>{stats.paid}</span><small>Paid</small></div>
                             </div>
-                            <p className="revenue">Revenue: ₹{stats.get().d * CONFIG.price}</p>
+                            <div className="admin-section">
+                                <h4>Template Pricing</h4>
+                                {TEMPLATES.filter(t => t.price > 0).map(t => (
+                                    <div key={t.id} className="admin-row">
+                                        <span>{t.name}</span>
+                                        <span>₹{t.price}</span>
+                                    </div>
+                                ))}
+                            </div>
                         </div>
                     </div>
                 </div>
             )}
 
             <main>
-                {step === 'home' && (
-                    <section className="home">
-                        <div className="hero">
-                            <span className="badge">Free Resume Formatter</span>
-                            <h1>Format your resume into a clean, professional PDF</h1>
-                            <p className="subtitle">Upload your existing resume. We extract and format it beautifully. Edit any section. Download instantly.</p>
+                {/* STEP 1: UPLOAD */}
+                {step === 'upload' && (
+                    <section className="upload-page">
+                        {processing ? (
+                            <div className="processing-box">
+                                <div className="spinner" />
+                                <h3>Processing your resume</h3>
+                                <div className="processing-steps">
+                                    {['Reading PDF', 'Extracting sections', 'Analyzing content', 'Validating data'].map((s, i) => (
+                                        <div key={i} className={`p-step ${i < processingStage ? 'done' : ''} ${i === processingStage ? 'active' : ''}`}>
+                                            {i < processingStage ? <Check size={14} /> : i === processingStage ? <Loader size={14} className="spin" /> : <span>{i + 1}</span>}
+                                            <span>{s}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="upload-content">
+                                <div className="hero-badge">Resume Formatter</div>
+                                <h1>Upload your resume</h1>
+                                <p className="hero-sub">Get a formatted PDF. No login. No data stored.</p>
 
-                            <div className="upload-area">
-                                <input type="file" accept=".pdf" onChange={handleUpload} id="file" />
-                                <label htmlFor="file">
-                                    <Upload size={24} />
-                                    <div><strong>Upload Resume</strong><span>PDF file only • Max 5MB</span></div>
-                                </label>
-                            </div>
+                                <div className="upload-zone">
+                                    <input type="file" accept=".pdf" id="resume-file" onChange={handleUpload} />
+                                    <label htmlFor="resume-file">
+                                        <Upload size={32} />
+                                        <span>Drop PDF here or click to upload</span>
+                                        <small>Max 10MB • PDF only</small>
+                                    </label>
+                                </div>
 
-                            <div className="hero-features">
-                                <div className="hf"><Clock size={18} /><span>2 min process</span></div>
-                                <div className="hf"><Shield size={18} /><span>No signup</span></div>
-                                <div className="hf"><Zap size={18} /><span>All pages scanned</span></div>
+                                <div className="trust-badges">
+                                    <span><Check size={14} /> No signup</span>
+                                    <span><Check size={14} /> Files not stored</span>
+                                    <span><Check size={14} /> Free preview</span>
+                                </div>
                             </div>
-                        </div>
-
-                        <div className="benefits">
-                            <div className="benefit">
-                                <div className="b-icon"><Layout size={20} /></div>
-                                <h3>Smart Extraction</h3>
-                                <p>Detects name, email, LinkedIn, GitHub, skills & more</p>
-                            </div>
-                            <div className="benefit">
-                                <div className="b-icon"><Pencil size={20} /></div>
-                                <h3>Edit Easily</h3>
-                                <p>Fix any section, add missing info</p>
-                            </div>
-                            <div className="benefit">
-                                <div className="b-icon"><Download size={20} /></div>
-                                <h3>Download PDF</h3>
-                                <p>Free preview, ₹{CONFIG.price} for clean PDF</p>
-                            </div>
-                        </div>
+                        )}
                     </section>
                 )}
 
-                {step === 'loading' && (
-                    <section className="loading">
-                        <div className="spinner"></div>
-                        <p>Scanning all pages...</p>
-                    </section>
-                )}
+                {/* STEP 2: TARGETING (Optional JD) */}
+                {step === 'targeting' && (
+                    <section className="targeting-page">
+                        <div className="page-layout">
+                            <div className="left-panel">
+                                <button className="back-btn" onClick={() => setStep('upload')}><ChevronLeft size={20} /></button>
+                                <h2>Extraction Complete</h2>
+                                <p className="subtitle">Review what we found. Add a job description for targeted keywords.</p>
 
-                {step === 'edit' && (
-                    <section className="editor">
-                        {/* LEFT: Resume Edit */}
-                        <div className="editor-left">
-                            <div className="editor-header">
-                                <button onClick={() => setStep('home')} className="btn-back">
-                                    <ChevronLeft size={20} />
-                                </button>
-                                <div>
-                                    <h2>Edit Resume</h2>
-                                    <p className="sub">Review and update your details</p>
-                                </div>
-                                <span className="step-badge">1/2</span>
-                            </div>
-
-                            <div className="sections-container">
-                                {renderSectionGroup('Personal', sectionGroups.personal)}
-                                {renderSectionGroup('Experience', sectionGroups.content)}
-                            </div>
-
-                            <button className="btn primary full" onClick={() => setStep('template')}>
-                                Continue <ChevronRight size={16} />
-                            </button>
-                        </div>
-
-                        {/* RIGHT: Target Job (Optional) */}
-                        <div className="editor-right">
-                            <div className="target-card">
-                                <div className="card-header">
-                                    <h3>Target Job <span className="opt">(Optional)</span></h3>
-                                </div>
-                                <p className="card-hint">Tailor your resume to a specific job for better results.</p>
-
-                                <div className="field">
-                                    <label>Role</label>
-                                    <input
-                                        value={resume.jobRole}
-                                        onChange={e => update('jobRole', e.target.value)}
-                                        placeholder="e.g. Software Engineer"
-                                    />
+                                {/* Extraction Status */}
+                                <div className="status-panel">
+                                    <h4>Extraction Status</h4>
+                                    {extractionStatus.map((s, i) => (
+                                        <div key={i} className={`status-row ${s.status}`}>
+                                            {s.status === 'extracted' ? <Check size={14} /> : s.status === 'missing' ? <X size={14} /> : <AlertTriangle size={14} />}
+                                            <span className="status-field">{s.field}</span>
+                                            <span className="status-val">{s.value || s.message}</span>
+                                        </div>
+                                    ))}
                                 </div>
 
-                                <div className="field">
-                                    <label>Job Description</label>
+                                {/* Profile Detection */}
+                                <div className="profile-box">
+                                    <div className="profile-label">Detected Profile</div>
+                                    <div className="profile-type">{profileType.type}</div>
+                                    <div className="profile-reason">{profileType.reason} • {profileType.years} years</div>
+                                </div>
+
+                                {/* Optional JD Input */}
+                                <div className="jd-section">
+                                    <h4>Target a Job (Optional)</h4>
                                     <textarea
-                                        value={resume.jobDescription}
-                                        onChange={e => update('jobDescription', e.target.value)}
+                                        value={jd}
+                                        onChange={e => setJd(e.target.value)}
                                         placeholder="Paste job description to match keywords..."
-                                        rows={4}
+                                        rows={5}
                                     />
-                                </div>
-
-                                <div className="field">
-                                    <label>Key Skills Needed</label>
-                                    <input
-                                        value={resume.specifications}
-                                        onChange={e => update('specifications', e.target.value)}
-                                        placeholder="e.g. React, Python, AWS"
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Keywords Match - only show when JD exists */}
-                            {atsMatches.length > 0 && (
-                                <div className="keywords-card">
-                                    <h4>Keywords Matched</h4>
-                                    <div className="keywords">
-                                        {atsMatches.slice(0, 10).map((m, i) => (
-                                            <span key={i} className={m.found ? 'found' : 'miss'}>
-                                                {m.keyword}
-                                            </span>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    </section>
-                )}
-
-                {step === 'template' && (
-                    <section className="templates-page">
-                        {/* Header */}
-                        <div className="tpl-header">
-                            <button onClick={() => setStep('edit')} className="btn-back">
-                                <ChevronLeft size={20} />
-                            </button>
-                            <div className="tpl-header-content">
-                                <h2>Choose Your Template</h2>
-                                <p>Select a design that fits your style</p>
-                            </div>
-                        </div>
-
-                        {/* Template Gallery - Full A4 Frames */}
-                        <div className="tpl-gallery">
-                            <div className="tpl-gallery-scroll">
-                                {TEMPLATES.map((t, idx) => (
-                                    <div 
-                                        key={t.id} 
-                                        className={`tpl-frame ${template === t.id ? 'active' : ''} ${t.price > 0 ? 'premium' : ''}`} 
-                                        onClick={() => setTemplate(t.id)}
-                                    >
-                                        <div className="tpl-frame-inner">
-                                            {/* Live preview with actual user data */}
-                                            <div className={`tpl-cv-preview ${t.id}`}>
-                                                <div className="tcv-header">
-                                                    <h3>{resume.name || 'Your Name'}</h3>
-                                                    {resume.jobRole && <span className="tcv-role">{resume.jobRole}</span>}
-                                                    <p className="tcv-contact">{resume.email || 'email@example.com'} {resume.phone && `• ${resume.phone}`}</p>
-                                                </div>
-                                                {resume.profile && (
-                                                    <div className="tcv-section">
-                                                        <h4>Profile</h4>
-                                                        <p>{resume.profile.substring(0, 150)}...</p>
-                                                    </div>
-                                                )}
-                                                {resume.skills.length > 0 && (
-                                                    <div className="tcv-section">
-                                                        <h4>Skills</h4>
-                                                        <div className="tcv-skills">
-                                                            {resume.skills.slice(0, 6).map((s, i) => <span key={i}>{s}</span>)}
-                                                        </div>
-                                                    </div>
-                                                )}
-                                                {resume.experience && (
-                                                    <div className="tcv-section">
-                                                        <h4>Experience</h4>
-                                                        <p>{resume.experience.substring(0, 100)}...</p>
-                                                    </div>
-                                                )}
+                                    {jdAnalysis && (
+                                        <div className="jd-results">
+                                            <div className="jd-score">{jdAnalysis.score}% Match</div>
+                                            <div className="jd-tags">
+                                                {jdAnalysis.matched.slice(0, 5).map((m, i) => <span key={i} className="tag matched">{m}</span>)}
+                                                {jdAnalysis.missing.slice(0, 3).map((m, i) => <span key={i} className="tag missing">{m}</span>)}
                                             </div>
-                                            {t.price > 0 && <span className="tpl-badge">₹{t.price}</span>}
-                                            {template === t.id && <div className="tpl-selected"><Check size={16} /></div>}
                                         </div>
-                                        <div className="tpl-frame-info">
-                                            <span className="tpl-frame-name">{t.name}</span>
-                                            <span className="tpl-frame-type">{t.price > 0 ? 'Premium' : 'Free'}</span>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
+                                    )}
+                                </div>
 
-                        {/* Bottom Action */}
-                        <div className="tpl-footer">
-                            <div className="tpl-selected-info">
-                                <span>Selected: <strong>{TEMPLATES.find(t => t.id === template)?.name}</strong></span>
-                                {TEMPLATES.find(t => t.id === template)?.price ? (
-                                    <span className="price-tag">₹{TEMPLATES.find(t => t.id === template)?.price}</span>
-                                ) : (
-                                    <span className="free-tag">Free</span>
-                                )}
-                            </div>
-                            <button className="btn primary large" onClick={() => { stats.log('p'); setStep('preview'); }}>
-                                Continue <ChevronRight size={18} />
-                            </button>
-                        </div>
-                    </section>
-                )}
-
-                {step === 'preview' && (
-                    <section className="final-preview">
-                        <h2>Your Resume</h2>
-                        <div className="cv-frame final"><CVPreview showWatermark={!paid} /></div>
-                        <p className="preview-note">{paid ? 'Ready to download' : `Free preview • ₹${CONFIG.price} removes watermark`}</p>
-                        {downloadError && (
-                            <div className="error-toast">
-                                <AlertCircle size={14} /> {downloadError}
-                            </div>
-                        )}
-                        <div className="btn-row">
-                            <button className="btn secondary" onClick={() => setStep('template')}>Back</button>
-                            {paid ? (
-                                <button className="btn primary" onClick={handleDownload} disabled={isDownloading}>
-                                    {isDownloading ? <span className="btn-loading">Generating...</span> : <><Download size={16} /> Download PDF</>}
+                                <button className="btn primary full" onClick={proceedToValidation}>
+                                    Continue to Validation <ChevronRight size={16} />
                                 </button>
-                            ) : (
-                                <>
-                                    <button className="btn outline" onClick={handleDownload} disabled={isDownloading}>
-                                        {isDownloading ? 'Generating...' : 'Download with watermark'}
-                                    </button>
-                                    <button className="btn primary" onClick={() => setStep('pay')}>Get Clean PDF — ₹{CONFIG.price}</button>
-                                </>
-                            )}
+                            </div>
+
+                            <div className="right-panel">
+                                <A4Preview />
+                            </div>
                         </div>
                     </section>
                 )}
 
-                {
-                    step === 'pay' && (
-                        <section className="payment">
-                            <div className="pay-card">
-                                <h2>₹{CONFIG.price}</h2>
-                                <p>One-time payment</p>
-                                <div className="upi"><span>Pay via UPI</span><strong>hexastack@upi</strong></div>
-                                <button className="btn primary full" onClick={() => { setPaid(true); setStep('done'); }}><Check size={16} /> I have paid</button>
-                                <button className="btn-link" onClick={() => setStep('preview')}>Go back</button>
-                            </div>
-                        </section>
-                    )
-                }
+                {/* STEP 3: VALIDATION GATE */}
+                {step === 'validation' && (
+                    <section className="validation-page">
+                        <div className="page-layout">
+                            <div className="left-panel">
+                                <button className="back-btn" onClick={() => setStep('targeting')}><ChevronLeft size={20} /></button>
+                                <h2>Validation Gate</h2>
+                                <p className="subtitle">Fix issues before proceeding. Errors must be resolved.</p>
 
-                {step === 'done' && (
-                    <section className="done">
-                        <div className="done-icon"><Check size={28} /></div>
-                        <h2>Payment Confirmed</h2>
-                        <p>Download your clean, professional resume.</p>
-                        {downloadError && (
-                            <div className="error-toast">
-                                <AlertCircle size={14} /> {downloadError}
+                                {/* Validation Results */}
+                                <div className="validation-list">
+                                    {validationErrors.length === 0 ? (
+                                        <div className="all-pass">
+                                            <Check size={24} />
+                                            <span>All checks passed</span>
+                                        </div>
+                                    ) : (
+                                        validationErrors.map((err, i) => (
+                                            <div key={i} className={`val-item ${err.type}`}>
+                                                {err.type === 'error' ? <AlertCircle size={16} /> : <AlertTriangle size={16} />}
+                                                <span>{err.message}</span>
+                                                {err.fixable && <button className="fix-btn">Fix</button>}
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+
+                                {/* Quick Edit Section */}
+                                <div className="quick-edit">
+                                    <h4>Quick Edit</h4>
+                                    <div className="edit-row">
+                                        <label>Name</label>
+                                        <input value={resume.name} onChange={e => setResume(p => ({ ...p, name: e.target.value }))} />
+                                    </div>
+                                    <div className="edit-row">
+                                        <label>Email</label>
+                                        <input value={resume.email} onChange={e => setResume(p => ({ ...p, email: e.target.value }))} />
+                                    </div>
+                                    <div className="edit-row">
+                                        <label>Phone</label>
+                                        <input value={resume.phone} onChange={e => setResume(p => ({ ...p, phone: e.target.value }))} />
+                                    </div>
+                                </div>
+
+                                <button
+                                    className="btn primary full"
+                                    disabled={validationErrors.some(e => e.type === 'error')}
+                                    onClick={() => setStep('template')}
+                                >
+                                    {validationErrors.some(e => e.type === 'error') ? 'Fix Errors to Continue' : 'Choose Template'}
+                                    <ChevronRight size={16} />
+                                </button>
                             </div>
-                        )}
-                        <button className="btn primary" onClick={handleDownload} disabled={isDownloading}>
-                            {isDownloading ? 'Generating...' : <><Download size={16} /> Download PDF</>}
-                        </button>
-                        <button className="btn-link" onClick={() => { setStep('home'); setPaid(false); }}>Format another resume</button>
+
+                            <div className="right-panel">
+                                <A4Preview />
+                            </div>
+                        </div>
                     </section>
                 )}
-            </main >
 
-            <footer><p>HexaStack Resume Formatter — Format your CV online, free preview, instant download.</p></footer>
-        </div >
+                {/* STEP 4: TEMPLATE SELECTION */}
+                {step === 'template' && (
+                    <section className="template-page">
+                        <div className="page-layout template-layout">
+                            <div className="template-gallery">
+                                <div className="gallery-head">
+                                    <button className="back-btn" onClick={() => setStep('validation')}><ChevronLeft size={20} /></button>
+                                    <h2>Choose Template</h2>
+                                </div>
+                                <div className="template-grid">
+                                    {TEMPLATES.map(t => (
+                                        <div
+                                            key={t.id}
+                                            className={`tpl-card ${template === t.id ? 'active' : ''} ${t.price > 0 && !paid ? 'premium' : ''}`}
+                                            onClick={() => setTemplate(t.id)}
+                                        >
+                                            <div className={`tpl-preview ${t.id}`}>
+                                                <div className="tpl-header" style={{ background: t.colors.primary }} />
+                                                <div className="tpl-body" />
+                                            </div>
+                                            <div className="tpl-info">
+                                                <span className="tpl-name">{t.name}</span>
+                                                <span className="tpl-ats">ATS: {t.atsScore}%</span>
+                                                <span className="tpl-for">{t.bestFor.join(', ')}</span>
+                                                {t.price > 0 && <span className="tpl-price">₹{t.price}</span>}
+                                            </div>
+                                            {template === t.id && <div className="tpl-check"><Check size={14} /></div>}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="template-preview-panel">
+                                <h3>Live Preview</h3>
+                                <A4Preview />
+                                <button className="btn primary full" onClick={() => setStep('download')}>
+                                    Continue <ChevronRight size={16} />
+                                </button>
+                            </div>
+                        </div>
+                    </section>
+                )}
+
+                {/* STEP 5: DOWNLOAD */}
+                {step === 'download' && (
+                    <section className="download-page">
+                        <div className="page-layout">
+                            <div className="download-preview-wrap">
+                                <A4Preview />
+                            </div>
+                            <div className="download-panel">
+                                <button className="back-btn" onClick={() => setStep('template')}><ChevronLeft size={20} /></button>
+                                <h2>Download Resume</h2>
+
+                                {/* Final Checklist */}
+                                <div className="final-checklist">
+                                    <h4>Final Check</h4>
+                                    <div className="check-item pass"><Check size={14} /> Name and contact info</div>
+                                    <div className="check-item pass"><Check size={14} /> Experience with dates</div>
+                                    <div className="check-item pass"><Check size={14} /> Skills categorized</div>
+                                    <div className="check-item pass"><Check size={14} /> Education details</div>
+                                    {jdAnalysis && <div className="check-item pass"><Check size={14} /> JD Match: {jdAnalysis.score}%</div>}
+                                </div>
+
+                                {/* Download Options */}
+                                <div className="download-options">
+                                    <div className="dl-option free">
+                                        <h3>Free</h3>
+                                        <ul>
+                                            <li><Check size={14} /> PDF Download</li>
+                                            <li><X size={14} /> Watermark included</li>
+                                        </ul>
+                                        <button className="btn secondary full" onClick={downloadPDF}>
+                                            <Download size={16} /> Download with Watermark
+                                        </button>
+                                    </div>
+
+                                    <div className="dl-option paid">
+                                        <span className="rec-tag">Recommended</span>
+                                        <h3>₹{TEMPLATES.find(t => t.id === template)?.price || 19}</h3>
+                                        <ul>
+                                            <li><Check size={14} /> Clean PDF</li>
+                                            <li><Check size={14} /> No watermark</li>
+                                            <li><Check size={14} /> Premium template</li>
+                                        </ul>
+                                        <button className="btn primary full" onClick={() => { setPaid(true); logStat('paid'); downloadPDF(); }}>
+                                            <Download size={16} /> Pay & Download
+                                        </button>
+                                        <p className="payment-hint">UPI: {CONFIG.upi}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                )}
+            </main>
+
+            <footer>
+                <p>HexaStack Resume Formatter</p>
+                <div className="footer-links">
+                    <span>No signup required</span>
+                    <span>Files deleted after processing</span>
+                    <span>No tracking</span>
+                </div>
+            </footer>
+        </div>
     );
 }
