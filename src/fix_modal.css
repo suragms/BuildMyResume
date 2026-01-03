@@ -1,0 +1,32 @@
+/* FIX MODAL - For validation fixes */
+.fix-modal {
+    width: 400px;
+    max-width: 90vw;
+}
+
+.fix-modal label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+    color: var(--slate-700);
+}
+
+.fix-modal input {
+    width: 100%;
+    padding: 12px;
+    border: var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 20px;
+    font-size: 14px;
+}
+
+.fix-modal input:focus {
+    outline: none;
+    border-color: var(--slate-400);
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
